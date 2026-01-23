@@ -9,19 +9,9 @@ A Swift package for macOS window discovery, tracking, manipulation, and preview 
 - macOS 12.0+
 - Swift 5.9+
 
-## Installation
-
-Add to your `Package.swift`:
-
-```swift
-dependencies: [
-    .package(url: "https://github.com/yourusername/WindowKit", from: "1.0.0")
-]
-```
-
 ## Permissions Required
 
-- **Accessibility**: Window enumeration, state tracking, and manipulation
+- **Accessibility**: Window manipulation
 - **Screen Recording**: Window preview capture
 
 ## Usage
@@ -43,7 +33,7 @@ let byApp = await WindowKit.shared.windows(application: someApp)
 let byBundle = await WindowKit.shared.windows(bundleID: "com.apple.Safari")
 let byID = await WindowKit.shared.window(withID: windowID)
 
-// Manual refresh
+// Manual refresh (equivalent to getActiveWindows being called on dock hover in DockDoor)
 await WindowKit.shared.refresh(application: someApp)
 await WindowKit.shared.refreshAll()
 
@@ -165,24 +155,10 @@ Check and request permissions:
 let status = WindowKit.shared.permissionStatus
 print("Accessibility: \(status.accessibility)")
 print("Screen Recording: \(status.screenRecording)")
-
-// Request permissions (opens System Preferences)
-let newStatus = await WindowKit.shared.requestPermissions()
 ```
 
-## Architecture
-
-WindowKit uses a two-tier discovery strategy:
-
-1. **ScreenCaptureKit** (macOS 12.3+): High-fidelity enumeration of on-screen windows
-2. **Accessibility API**: Fallback for minimized windows, hidden apps, and windows SCK misses
-
-All windows are **validated** before being returned - stale or invalid windows are automatically purged from the cache.
-
-Window discovery runs with:
-- **Timeout protection**: 10-second timeout on all operations
-- **Concurrent processing**: Up to 4 windows processed in parallel
-
-## License
+## License & Acknowledgements
 
 MIT
+
+Special thanks to [Louis Pontoise](https://github.com/lwouis) ([AltTab](https://github.com/lwouis/alt-tab-macos)) for graciously permitting use of his private API work under MIT.
