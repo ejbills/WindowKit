@@ -69,7 +69,6 @@ enum ConcurrencyHelpers {
                 }
             }
 
-            // Wait for remaining tasks
             while runningCount > 0 {
                 await group.next()
                 runningCount -= 1
@@ -107,7 +106,6 @@ enum ConcurrencyHelpers {
                 }
             }
 
-            // Collect remaining results
             for await result in group {
                 if let value = result {
                     results.append(value)

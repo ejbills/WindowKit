@@ -18,11 +18,8 @@ public struct CapturedWindow: Identifiable, Hashable, @unchecked Sendable {
     internal var cachedPreview: CGImage?
     internal var previewTimestamp: Date?
 
-    /// The accessibility element for this window (use for window manipulation)
     public let axElement: AXUIElement
-    /// The accessibility element for the owning application
     public let appAxElement: AXUIElement
-    /// The close button element (if available)
     public let closeButton: AXUIElement?
 
     public var preview: CGImage? { cachedPreview }
@@ -73,10 +70,7 @@ public struct CapturedWindow: Identifiable, Hashable, @unchecked Sendable {
     }
 }
 
-// MARK: - Window Manipulation
-
 extension CapturedWindow {
-    /// Brings this window to the front and focuses it
     public func bringToFront() throws {
         guard let app = ownerApplication else {
             throw WindowManipulationError.applicationNotFound
@@ -94,7 +88,6 @@ extension CapturedWindow {
         app.activate()
     }
 
-    /// Makes this window the key window using SkyLight private API
     private func makeKeyWindow(_ psn: UnsafeMutablePointer<ProcessSerialNumber>) {
         var bytes = [UInt8](repeating: 0, count: 0xF8)
         bytes[0x04] = 0xF8
@@ -108,7 +101,6 @@ extension CapturedWindow {
         _ = SLPSPostEventRecordTo(psn, &bytes)
     }
 
-    /// Minimizes or restores this window
     @discardableResult
     public mutating func toggleMinimize() throws -> Bool {
         if isMinimized {
@@ -127,14 +119,12 @@ extension CapturedWindow {
         }
     }
 
-    /// Minimizes this window
     public mutating func minimize() throws {
         guard !isMinimized else { return }
         try axElement.setAttribute(kAXMinimizedAttribute, value: true)
         isMinimized = true
     }
 
-    /// Restores (unminimizes) this window
     public mutating func restore() throws {
         guard isMinimized else { return }
         if let app = ownerApplication, app.isHidden {
@@ -146,7 +136,6 @@ extension CapturedWindow {
         isMinimized = false
     }
 
-    /// Hides or shows the owning application
     @discardableResult
     public mutating func toggleHidden() throws -> Bool {
         let newHiddenState = !isOwnerHidden
@@ -159,14 +148,12 @@ extension CapturedWindow {
         return newHiddenState
     }
 
-    /// Hides the owning application
     public mutating func hide() throws {
         guard !isOwnerHidden else { return }
         try appAxElement.setAttribute(kAXHiddenAttribute, value: true)
         isOwnerHidden = true
     }
 
-    /// Shows (unhides) the owning application
     public mutating func unhide() throws {
         guard isOwnerHidden else { return }
         try appAxElement.setAttribute(kAXHiddenAttribute, value: false)
@@ -175,23 +162,19 @@ extension CapturedWindow {
         isOwnerHidden = false
     }
 
-    /// Toggles fullscreen mode for this window
     public func toggleFullScreen() throws {
         let isCurrentlyFullscreen = (try? axElement.isFullscreen()) ?? false
         try axElement.setAttribute("AXFullScreen", value: !isCurrentlyFullscreen)
     }
 
-    /// Enters fullscreen mode
     public func enterFullScreen() throws {
         try axElement.setAttribute("AXFullScreen", value: true)
     }
 
-    /// Exits fullscreen mode
     public func exitFullScreen() throws {
         try axElement.setAttribute("AXFullScreen", value: false)
     }
 
-    /// Closes this window
     public func close() throws {
         guard let button = closeButton else {
             throw WindowManipulationError.closeButtonNotFound
@@ -199,7 +182,6 @@ extension CapturedWindow {
         try button.performAction(kAXPressAction)
     }
 
-    /// Quits the owning application
     public func quit(force: Bool = false) {
         guard let app = ownerApplication else { return }
         if force {
@@ -209,7 +191,6 @@ extension CapturedWindow {
         }
     }
 
-    /// Sets the window position
     public func setPosition(_ position: CGPoint) throws {
         guard let positionValue = AXValue.from(point: position) else {
             throw WindowManipulationError.invalidValue
@@ -217,7 +198,6 @@ extension CapturedWindow {
         try axElement.setAttribute(kAXPositionAttribute, value: positionValue)
     }
 
-    /// Sets the window size
     public func setSize(_ size: CGSize) throws {
         guard let sizeValue = AXValue.from(size: size) else {
             throw WindowManipulationError.invalidValue
@@ -225,14 +205,11 @@ extension CapturedWindow {
         try axElement.setAttribute(kAXSizeAttribute, value: sizeValue)
     }
 
-    /// Sets both position and size
     public func setPositionAndSize(position: CGPoint, size: CGSize) throws {
         try setPosition(position)
         try setSize(size)
     }
 }
-
-// MARK: - Errors
 
 public enum WindowManipulationError: Error, LocalizedError {
     case applicationNotFound

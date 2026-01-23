@@ -193,7 +193,7 @@ public struct WindowEnumerator {
                 }
             }
         } catch {
-            // Both checks failed
+            Logger.debug("isValidElement validation failed", details: "\(error)")
         }
 
         return false

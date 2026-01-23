@@ -1,9 +1,7 @@
 import Foundation
 import os.log
 
-/// Centralized logging for WindowKit
 public enum Logger {
-    /// Enable or disable logging. Default is false.
     public static var enabled: Bool = false
 
     private static let osLog = OSLog(subsystem: "com.windowkit", category: "WindowKit")
@@ -15,7 +13,6 @@ public enum Logger {
         case error = "ERROR"
     }
 
-    /// Log a message with the specified level and optional details
     public static func log(_ level: Level, _ message: String, details: String? = nil) {
         guard enabled else { return }
 
@@ -39,27 +36,23 @@ public enum Logger {
         print("[WindowKit] \(output)")
     }
 
-    /// Log debug level message
     public static func debug(_ message: String, details: String? = nil) {
         log(.debug, message, details: details)
     }
 
-    /// Log info level message
     public static func info(_ message: String, details: String? = nil) {
         log(.info, message, details: details)
     }
 
-    /// Log warning level message
     public static func warning(_ message: String, details: String? = nil) {
         log(.warning, message, details: details)
     }
 
-    /// Log error level message
     public static func error(_ message: String, details: String? = nil) {
         log(.error, message, details: details)
     }
 
-    /// Measure execution time of a block and log if it exceeds threshold
+    /// Logs a warning if block execution exceeds threshold
     @discardableResult
     public static func measureSlow<T>(
         _ operation: String,
@@ -80,7 +73,6 @@ public enum Logger {
         return result
     }
 
-    /// Measure execution time of an async block and log if it exceeds threshold
     @discardableResult
     public static func measureSlowAsync<T>(
         _ operation: String,

@@ -87,14 +87,11 @@ public actor WindowRepository {
     public func store(forPID pid: pid_t, windows: Set<CapturedWindow>) -> ChangeReport {
         let oldWindows = entries[pid] ?? []
 
-        // Merge strategy: keep existing windows, add/update new ones
         var merged = oldWindows
 
-        // Add or update windows from new set, preserving previews
         for window in windows {
             var windowToInsert = window
 
-            // Preserve existing preview if new window doesn't have one
             if windowToInsert.cachedPreview == nil,
                let oldWindow = merged.first(where: { $0.id == window.id }),
                oldWindow.cachedPreview != nil {

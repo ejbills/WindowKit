@@ -180,7 +180,6 @@ public final class WindowTracker {
     private func discoverViaSCK(for app: NSRunningApplication) async -> [CapturedWindow]? {
         let pid = app.processIdentifier
 
-        // Fetch SCShareableContent with timeout protection
         let contentResult: SCShareableContent? = await ConcurrencyHelpers.withTimeoutOptional {
             try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
         }
@@ -192,7 +191,6 @@ public final class WindowTracker {
         let appWindows = content.windows.filter { $0.owningApplication?.processID == pid }
         let freshIDs = await repository.windowIDsWithFreshPreviews()
 
-        // Process windows concurrently with limited concurrency
         let results: [CapturedWindow] = await ConcurrencyHelpers.mapConcurrent(appWindows, maxConcurrent: 4) { [self] scWindow -> CapturedWindow? in
             guard await isValidSCKWindow(scWindow) else { return nil }
             return await captureFromSCKWindow(scWindow, app: app, skipPreview: freshIDs.contains(scWindow.windowID))
@@ -303,7 +301,6 @@ public final class WindowTracker {
         let activeSpaces = activeSpaceIDs()
         let freshIDs = await repository.windowIDsWithFreshPreviews()
 
-        // Pre-filter windows and resolve IDs synchronously to avoid race conditions
         var candidateWindows: [(axWindow: AXUIElement, windowID: CGWindowID, descriptor: CGWindowDescriptor)] = []
         var usedIDs = excludeIDs
 
@@ -336,7 +333,6 @@ public final class WindowTracker {
             candidateWindows.append((axWindow, windowID, descriptor))
         }
 
-        // Process candidate windows concurrently
         let results = await ConcurrencyHelpers.mapConcurrent(candidateWindows, maxConcurrent: 4) { [self] candidate in
             await captureAXWindow(
                 candidate.axWindow,

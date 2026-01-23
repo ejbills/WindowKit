@@ -5,7 +5,6 @@ import Combine
 public final class WindowKit {
     public static let shared = WindowKit()
 
-    /// Enable or disable debug logging. Default is false.
     public var logging: Bool {
         get { Logger.enabled }
         set { Logger.enabled = newValue }
