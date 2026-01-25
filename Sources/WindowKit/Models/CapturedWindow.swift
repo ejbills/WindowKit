@@ -71,9 +71,21 @@ public struct CapturedWindow: Identifiable, Hashable, @unchecked Sendable {
 }
 
 extension CapturedWindow {
-    public func bringToFront() throws {
+    public mutating func bringToFront() throws {
         guard let app = ownerApplication else {
             throw WindowManipulationError.applicationNotFound
+        }
+
+        // Unhide the app if it's hidden
+        if app.isHidden {
+            app.unhide()
+            isOwnerHidden = false
+        }
+
+        // Unminimize the window if it's minimized
+        if (try? axElement.isMinimized()) == true {
+            try axElement.setAttribute(kAXMinimizedAttribute, value: false)
+            isMinimized = false
         }
 
         var psn = ProcessSerialNumber()

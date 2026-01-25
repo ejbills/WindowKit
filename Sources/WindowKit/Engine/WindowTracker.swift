@@ -6,6 +6,7 @@ import ScreenCaptureKit
 public final class WindowTracker {
     static let minimumWindowSize = CGSize(width: 100, height: 100)
     static let eventDebounceInterval: TimeInterval = 0.3
+    static let operationTimeout: UInt64 = 10_000_000_000 // 10 seconds
 
     public let repository: WindowRepository
 
@@ -103,7 +104,7 @@ public final class WindowTracker {
         Logger.debug("AX discovery complete", details: "pid=\(pid), found=\(axWindows.count)")
         discoveredWindows.append(contentsOf: axWindows)
 
-        let changes = await repository.store(forPID: pid, windows: Set(discoveredWindows))
+        let changes = repository.store(forPID: pid, windows: Set(discoveredWindows))
         emitChanges(changes)
 
         Logger.info("Application tracked", details: "pid=\(pid), name=\(appName), windows=\(discoveredWindows.count)")
@@ -128,7 +129,7 @@ public final class WindowTracker {
             }
 
             for pid in processedPIDs {
-                _ = await repository.purify(forPID: pid)
+                _ = repository.purify(forPID: pid, validator: enumerator.isValidElement)
             }
 
             let elapsed = (CFAbsoluteTimeGetCurrent() - startTime) * 1000
@@ -143,7 +144,7 @@ public final class WindowTracker {
         }
 
         for pid in processedPIDs {
-            _ = await repository.purify(forPID: pid)
+            _ = repository.purify(forPID: pid, validator: enumerator.isValidElement)
         }
 
         let elapsed = (CFAbsoluteTimeGetCurrent() - startTime) * 1000
@@ -157,7 +158,7 @@ public final class WindowTracker {
     public func capturePreview(for windowID: CGWindowID) async -> CGImage? {
         do {
             let image = try screenshotService.captureWindow(id: windowID)
-            await repository.storePreview(image, forWindowID: windowID)
+            repository.storePreview(image, forWindowID: windowID)
             eventSubject.send(.previewCaptured(windowID, image))
             return image
         } catch {
@@ -166,8 +167,8 @@ public final class WindowTracker {
     }
 
     public func refreshPreviews(for pid: pid_t) async {
-        let windows = await repository.fetch(forPID: pid)
-        let freshIDs = await repository.windowIDsWithFreshPreviews()
+        let windows = repository.readCache(forPID: pid)
+        let freshIDs = repository.windowIDsWithFreshPreviews()
 
         let needsCapture = windows.filter { !freshIDs.contains($0.id) }
 
@@ -189,9 +190,9 @@ public final class WindowTracker {
         }
 
         let appWindows = content.windows.filter { $0.owningApplication?.processID == pid }
-        let freshIDs = await repository.windowIDsWithFreshPreviews()
+        let freshIDs = repository.windowIDsWithFreshPreviews()
 
-        let results: [CapturedWindow] = await ConcurrencyHelpers.mapConcurrent(appWindows, maxConcurrent: 4) { [self] scWindow -> CapturedWindow? in
+        let results: [CapturedWindow] = await ConcurrencyHelpers.mapConcurrent(appWindows, maxConcurrent: 4, timeout: 10) { [self] scWindow -> CapturedWindow? in
             guard await isValidSCKWindow(scWindow) else { return nil }
             return await captureFromSCKWindow(scWindow, app: app, skipPreview: freshIDs.contains(scWindow.windowID))
         }
@@ -251,7 +252,7 @@ public final class WindowTracker {
             if let image = try? screenshotService.captureWindow(id: scWindow.windowID) {
                 window.cachedPreview = image
                 window.previewTimestamp = Date()
-                await repository.storePreview(image, forWindowID: scWindow.windowID)
+                repository.storePreview(image, forWindowID: scWindow.windowID)
             }
         }
 
@@ -299,7 +300,7 @@ public final class WindowTracker {
 
         let cgCandidates = enumerator.cgDescriptors(forPID: pid)
         let activeSpaces = activeSpaceIDs()
-        let freshIDs = await repository.windowIDsWithFreshPreviews()
+        let freshIDs = repository.windowIDsWithFreshPreviews()
 
         var candidateWindows: [(axWindow: AXUIElement, windowID: CGWindowID, descriptor: CGWindowDescriptor)] = []
         var usedIDs = excludeIDs
@@ -333,7 +334,7 @@ public final class WindowTracker {
             candidateWindows.append((axWindow, windowID, descriptor))
         }
 
-        let results = await ConcurrencyHelpers.mapConcurrent(candidateWindows, maxConcurrent: 4) { [self] candidate in
+        let results = await ConcurrencyHelpers.mapConcurrent(candidateWindows, maxConcurrent: 4, timeout: 10) { [self] candidate in
             await captureAXWindow(
                 candidate.axWindow,
                 windowID: candidate.windowID,
@@ -382,7 +383,7 @@ public final class WindowTracker {
             if let image = try? screenshotService.captureWindow(id: windowID) {
                 window.cachedPreview = image
                 window.previewTimestamp = Date()
-                await repository.storePreview(image, forWindowID: windowID)
+                repository.storePreview(image, forWindowID: windowID)
             }
         }
 
@@ -399,8 +400,8 @@ public final class WindowTracker {
 
         case .applicationTerminated(let pid):
             watcherManager?.unwatch(pid: pid)
-            let windows = await repository.fetch(forPID: pid)
-            await repository.removeAll(forPID: pid)
+            let windows = repository.readCache(forPID: pid)
+            repository.removeAll(forPID: pid)
             for window in windows {
                 eventSubject.send(.windowDisappeared(window.id))
             }
@@ -428,15 +429,16 @@ public final class WindowTracker {
 
         case .windowDestroyed:
             debounce(key: "window-destroyed-\(pid)") { [weak self] in
+                guard let self else { return }
                 Logger.debug("Window destroyed notification, validating all windows", details: "pid=\(pid)")
-                _ = await self?.repository.purify(forPID: pid)
+                _ = repository.purify(forPID: pid, validator: enumerator.isValidElement)
             }
 
         case .windowMinimized(let element):
             debounce(key: "window-minimized-\(pid)") { [weak self] in
                 guard let self else { return }
-                _ = await repository.purify(forPID: pid)
-                await updateWindowState(element: element, pid: pid) { window in
+                _ = repository.purify(forPID: pid, validator: enumerator.isValidElement)
+                updateWindowState(element: element, pid: pid) { window in
                     CapturedWindow(
                         id: window.id,
                         title: window.title,
@@ -458,8 +460,8 @@ public final class WindowTracker {
         case .windowRestored(let element):
             debounce(key: "window-restored-\(pid)") { [weak self] in
                 guard let self else { return }
-                _ = await repository.purify(forPID: pid)
-                await updateWindowState(element: element, pid: pid) { window in
+                _ = repository.purify(forPID: pid, validator: enumerator.isValidElement)
+                updateWindowState(element: element, pid: pid) { window in
                     CapturedWindow(
                         id: window.id,
                         title: window.title,
@@ -481,8 +483,8 @@ public final class WindowTracker {
         case .applicationHidden:
             debounce(key: "app-hidden-\(pid)") { [weak self] in
                 guard let self else { return }
-                _ = await repository.purify(forPID: pid)
-                await repository.modify(forPID: pid) { windows in
+                _ = repository.purify(forPID: pid, validator: enumerator.isValidElement)
+                repository.modify(forPID: pid) { windows in
                     windows = Set(windows.map { window in
                         CapturedWindow(
                             id: window.id,
@@ -506,8 +508,8 @@ public final class WindowTracker {
         case .applicationRevealed:
             debounce(key: "app-revealed-\(pid)") { [weak self] in
                 guard let self else { return }
-                _ = await repository.purify(forPID: pid)
-                await repository.modify(forPID: pid) { windows in
+                _ = repository.purify(forPID: pid, validator: enumerator.isValidElement)
+                repository.modify(forPID: pid) { windows in
                     windows = Set(windows.map { window in
                         CapturedWindow(
                             id: window.id,
@@ -529,12 +531,12 @@ public final class WindowTracker {
             }
 
         case .windowFocused(let element), .mainWindowChanged(let element):
-            await updateWindowTimestamp(element: element, pid: pid)
+            updateWindowTimestamp(element: element, pid: pid)
 
         case .titleChanged(let element):
             if let role = try? element.role(), role == kAXWindowRole as String {
                 if let newTitle = try? element.title() {
-                    await updateWindowState(element: element, pid: pid) { window in
+                    updateWindowState(element: element, pid: pid) { window in
                         CapturedWindow(
                             id: window.id,
                             title: newTitle,
@@ -561,8 +563,8 @@ public final class WindowTracker {
         }
     }
 
-    private func updateWindowState(element: AXUIElement, pid: pid_t, update: (CapturedWindow) -> CapturedWindow) async {
-        let changes = await repository.modify(forPID: pid) { windows in
+    private func updateWindowState(element: AXUIElement, pid: pid_t, update: (CapturedWindow) -> CapturedWindow) {
+        let changes = repository.modify(forPID: pid) { windows in
             if let windowID = try? element.windowID(),
                let existing = windows.first(where: { $0.id == windowID }) {
                 windows.remove(existing)
@@ -575,8 +577,8 @@ public final class WindowTracker {
         emitChanges(changes)
     }
 
-    private func updateWindowTimestamp(element: AXUIElement, pid: pid_t) async {
-        await repository.modify(forPID: pid) { windows in
+    private func updateWindowTimestamp(element: AXUIElement, pid: pid_t) {
+        repository.modify(forPID: pid) { windows in
             if let windowID = try? element.windowID(),
                let existing = windows.first(where: { $0.id == windowID }) {
                 windows.remove(existing)

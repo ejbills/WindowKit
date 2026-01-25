@@ -1,19 +1,16 @@
 import Foundation
 
 enum ConcurrencyHelpers {
-    static let defaultTimeout: UInt64 = 10_000_000_000 // 10 seconds
+    static let defaultTimeoutSeconds: TimeInterval = 10
 
-    /// Runs an async operation with a timeout, returning nil if it exceeds the limit
     static func withTimeoutOptional<T: Sendable>(
-        nanoseconds: UInt64 = defaultTimeout,
+        seconds: TimeInterval = defaultTimeoutSeconds,
         operation: @escaping @Sendable () async -> T?
     ) async -> T? {
         await withTaskGroup(of: T?.self) { group in
+            group.addTask { await operation() }
             group.addTask {
-                await operation()
-            }
-            group.addTask {
-                try? await Task.sleep(nanoseconds: nanoseconds)
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
                 return nil
             }
             let result = await group.next() ?? nil
@@ -22,17 +19,14 @@ enum ConcurrencyHelpers {
         }
     }
 
-    /// Runs an async operation with a timeout, returning nil if it exceeds the limit
     static func withTimeout<T: Sendable>(
-        nanoseconds: UInt64 = defaultTimeout,
+        seconds: TimeInterval = defaultTimeoutSeconds,
         operation: @escaping @Sendable () async -> T
     ) async -> T? {
         await withTaskGroup(of: T?.self) { group in
+            group.addTask { await operation() }
             group.addTask {
-                await operation()
-            }
-            group.addTask {
-                try? await Task.sleep(nanoseconds: nanoseconds)
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
                 return nil
             }
             let result = await group.next() ?? nil
@@ -41,74 +35,110 @@ enum ConcurrencyHelpers {
         }
     }
 
-    /// Processes items concurrently with a maximum concurrency limit
     static func forEachConcurrent<T: Sendable>(
         _ items: [T],
         maxConcurrent: Int = 4,
-        timeout: UInt64 = defaultTimeout,
-        operation: @escaping @Sendable (T) async -> Void
+        timeout: TimeInterval? = nil,
+        operation: @Sendable @escaping (T) async throws -> Void
     ) async {
-        await withTaskGroup(of: Void.self) { group in
-            var runningCount = 0
-            var index = 0
+        guard !items.isEmpty else { return }
 
-            while index < items.count {
-                if runningCount < maxConcurrent {
-                    let item = items[index]
+        if let timeout {
+            await withTimeout(seconds: timeout) {
+                await performForEachConcurrent(items, maxConcurrent: maxConcurrent, operation: operation)
+            }
+        } else {
+            await performForEachConcurrent(items, maxConcurrent: maxConcurrent, operation: operation)
+        }
+    }
+
+    private static func performForEachConcurrent<T: Sendable>(
+        _ items: [T],
+        maxConcurrent: Int,
+        operation: @Sendable @escaping (T) async throws -> Void
+    ) async {
+        let concurrency = max(1, min(maxConcurrent, items.count))
+
+        await withTaskGroup(of: Void.self) { group in
+            var iterator = items.makeIterator()
+
+            for _ in 0..<concurrency {
+                guard !Task.isCancelled else { return }
+                if let item = iterator.next() {
                     group.addTask {
-                        _ = await withTimeout(nanoseconds: timeout) {
-                            await operation(item)
-                            return () as Void
-                        }
+                        guard !Task.isCancelled else { return }
+                        try? await operation(item)
                     }
-                    runningCount += 1
-                    index += 1
-                } else {
-                    await group.next()
-                    runningCount -= 1
                 }
             }
 
-            while runningCount > 0 {
-                await group.next()
-                runningCount -= 1
+            while await group.next() != nil {
+                guard !Task.isCancelled else {
+                    group.cancelAll()
+                    return
+                }
+                if let item = iterator.next() {
+                    group.addTask {
+                        guard !Task.isCancelled else { return }
+                        try? await operation(item)
+                    }
+                }
             }
         }
     }
 
-    /// Processes items concurrently and collects results
     static func mapConcurrent<T: Sendable, R: Sendable>(
         _ items: [T],
         maxConcurrent: Int = 4,
-        timeout: UInt64 = defaultTimeout,
-        operation: @escaping @Sendable (T) async -> R?
+        timeout: TimeInterval? = nil,
+        operation: @Sendable @escaping (T) async -> R?
     ) async -> [R] {
-        await withTaskGroup(of: R?.self) { group in
-            var results: [R] = []
-            var runningCount = 0
-            var index = 0
+        guard !items.isEmpty else { return [] }
 
-            while index < items.count {
-                if runningCount < maxConcurrent {
-                    let item = items[index]
+        if let timeout {
+            return await withTimeout(seconds: timeout) {
+                await performMapConcurrent(items, maxConcurrent: maxConcurrent, operation: operation)
+            } ?? []
+        } else {
+            return await performMapConcurrent(items, maxConcurrent: maxConcurrent, operation: operation)
+        }
+    }
+
+    private static func performMapConcurrent<T: Sendable, R: Sendable>(
+        _ items: [T],
+        maxConcurrent: Int,
+        operation: @Sendable @escaping (T) async -> R?
+    ) async -> [R] {
+        let concurrency = max(1, min(maxConcurrent, items.count))
+
+        return await withTaskGroup(of: R?.self) { group in
+            var results: [R] = []
+            results.reserveCapacity(items.count)
+            var iterator = items.makeIterator()
+
+            for _ in 0..<concurrency {
+                guard !Task.isCancelled else { return results }
+                if let item = iterator.next() {
                     group.addTask {
-                        await withTimeout(nanoseconds: timeout) {
-                            await operation(item)
-                        } ?? nil
+                        guard !Task.isCancelled else { return nil }
+                        return await operation(item)
                     }
-                    runningCount += 1
-                    index += 1
-                } else {
-                    if let result = await group.next(), let value = result {
-                        results.append(value)
-                    }
-                    runningCount -= 1
                 }
             }
 
-            for await result in group {
+            while let result = await group.next() {
+                guard !Task.isCancelled else {
+                    group.cancelAll()
+                    return results
+                }
                 if let value = result {
                     results.append(value)
+                }
+                if let item = iterator.next() {
+                    group.addTask {
+                        guard !Task.isCancelled else { return nil }
+                        return await operation(item)
+                    }
                 }
             }
 

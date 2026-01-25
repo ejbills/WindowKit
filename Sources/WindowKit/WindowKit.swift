@@ -23,11 +23,13 @@ public final class WindowKit {
     }
 
     public func allWindows() async -> [CapturedWindow] {
-        await tracker.repository.fetchAll()
+        tracker.repository.readAllCache()
     }
 
     public func windows(bundleID: String) async -> [CapturedWindow] {
-        await tracker.repository.fetch(bundleID: bundleID)
+        tracker.repository.readCache(bundleID: bundleID).sorted {
+            $0.lastInteractionTime > $1.lastInteractionTime
+        }
     }
 
     public func windows(application: NSRunningApplication) async -> [CapturedWindow] {
@@ -35,13 +37,13 @@ public final class WindowKit {
     }
 
     public func windows(pid: pid_t) async -> [CapturedWindow] {
-        await tracker.repository.fetch(forPID: pid).sorted {
+        tracker.repository.readCache(forPID: pid).sorted {
             $0.lastInteractionTime > $1.lastInteractionTime
         }
     }
 
     public func window(withID id: CGWindowID) async -> CapturedWindow? {
-        await tracker.repository.fetch(windowID: id)
+        tracker.repository.readCache(windowID: id)
     }
 
     public func refresh(application: NSRunningApplication) async {
