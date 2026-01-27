@@ -25,6 +25,11 @@ public final class WindowKit {
         }
     }
 
+    public var previewCacheDuration: TimeInterval {
+        get { tracker.repository.previewCacheDuration }
+        set { tracker.repository.previewCacheDuration = newValue }
+    }
+
     public var events: AnyPublisher<WindowEvent, Never> { tracker.events }
 
     public var permissionStatus: PermissionState {

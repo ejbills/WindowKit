@@ -8,18 +8,11 @@ public struct ChangeReport: Sendable {
     public static let empty = ChangeReport(added: [], removed: [], modified: [])
 }
 
-struct TimestampedPreview {
-    let image: CGImage
-    let timestamp: Date
-}
-
 public final class WindowRepository: @unchecked Sendable {
-    static let previewCacheDuration: TimeInterval = 30.0
-    static let maxCachedPreviews: Int = 100
+    public static let defaultPreviewCacheDuration: TimeInterval = 30.0
+    public var previewCacheDuration: TimeInterval = WindowRepository.defaultPreviewCacheDuration
 
     private var entries: [pid_t: Set<CapturedWindow>] = [:]
-    private var previews: [CGWindowID: TimestampedPreview] = [:]
-    private var previewAccessOrder: [CGWindowID] = []
     private let cacheLock = NSLock()
 
     public init() {}
@@ -135,20 +128,13 @@ public final class WindowRepository: @unchecked Sendable {
     public func removeAll(forPID pid: pid_t) {
         cacheLock.lock()
         defer { cacheLock.unlock() }
-        if let windows = entries.removeValue(forKey: pid) {
-            for window in windows {
-                previews.removeValue(forKey: window.id)
-                previewAccessOrder.removeAll { $0 == window.id }
-            }
-        }
+        entries.removeValue(forKey: pid)
     }
 
     public func clear() {
         cacheLock.lock()
         defer { cacheLock.unlock() }
         entries.removeAll()
-        previews.removeAll()
-        previewAccessOrder.removeAll()
     }
 
     @discardableResult
@@ -189,32 +175,52 @@ public final class WindowRepository: @unchecked Sendable {
     public func storePreview(_ image: CGImage, forWindowID windowID: CGWindowID) {
         cacheLock.lock()
         defer { cacheLock.unlock() }
-        previews[windowID] = TimestampedPreview(image: image, timestamp: Date())
-        previewAccessOrder.removeAll { $0 == windowID }
-        previewAccessOrder.append(windowID)
-        while previewAccessOrder.count > Self.maxCachedPreviews {
-            let evictID = previewAccessOrder.removeFirst()
-            previews.removeValue(forKey: evictID)
+        let now = Date()
+        for (pid, var windowSet) in entries {
+            if let window = windowSet.first(where: { $0.id == windowID }) {
+                var updatedWindow = window
+                updatedWindow.cachedPreview = image
+                updatedWindow.previewTimestamp = now
+                windowSet.remove(window)
+                windowSet.insert(updatedWindow)
+                entries[pid] = windowSet
+                return
+            }
         }
     }
 
     public func fetchPreview(forWindowID windowID: CGWindowID) -> CGImage? {
         cacheLock.lock()
         defer { cacheLock.unlock() }
-        guard let preview = previews[windowID] else { return nil }
-        previewAccessOrder.removeAll { $0 == windowID }
-        previewAccessOrder.append(windowID)
-        return preview.image
+        for windowSet in entries.values {
+            if let window = windowSet.first(where: { $0.id == windowID }) {
+                return window.cachedPreview
+            }
+        }
+        return nil
     }
 
     public func purgeExpiredPreviews() {
         cacheLock.lock()
         defer { cacheLock.unlock() }
         let now = Date()
-        let expiredIDs = previews.filter { now.timeIntervalSince($0.value.timestamp) > Self.previewCacheDuration }.map(\.key)
-        for windowID in expiredIDs {
-            previews.removeValue(forKey: windowID)
-            previewAccessOrder.removeAll { $0 == windowID }
+        for (pid, windowSet) in entries {
+            var modified = false
+            var updatedSet = windowSet
+            for window in windowSet {
+                if let timestamp = window.previewTimestamp,
+                   now.timeIntervalSince(timestamp) > previewCacheDuration {
+                    var updatedWindow = window
+                    updatedWindow.cachedPreview = nil
+                    updatedWindow.previewTimestamp = nil
+                    updatedSet.remove(window)
+                    updatedSet.insert(updatedWindow)
+                    modified = true
+                }
+            }
+            if modified {
+                entries[pid] = updatedSet
+            }
         }
     }
 
@@ -222,7 +228,33 @@ public final class WindowRepository: @unchecked Sendable {
         cacheLock.lock()
         defer { cacheLock.unlock() }
         let now = Date()
-        return Set(previews.compactMap { now.timeIntervalSince($0.value.timestamp) <= Self.previewCacheDuration ? $0.key : nil })
+        let cacheDuration = previewCacheDuration
+        var freshIDs = Set<CGWindowID>()
+        for windowSet in entries.values {
+            for window in windowSet {
+                if window.cachedPreview != nil,
+                   let timestamp = window.previewTimestamp,
+                   now.timeIntervalSince(timestamp) <= cacheDuration {
+                    freshIDs.insert(window.id)
+                }
+            }
+        }
+        return freshIDs
+    }
+
+    public func windowIDsWithFreshPreviews(forPID pid: pid_t) -> Set<CGWindowID> {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        let now = Date()
+        let cacheDuration = previewCacheDuration
+        guard let windows = entries[pid] else { return [] }
+        return Set(windows.compactMap { window -> CGWindowID? in
+            guard window.cachedPreview != nil,
+                  let timestamp = window.previewTimestamp,
+                  now.timeIntervalSince(timestamp) <= cacheDuration
+            else { return nil }
+            return window.id
+        })
     }
 
     private func removeEntryInternal(pid: pid_t, windowID: CGWindowID) {
@@ -230,8 +262,6 @@ public final class WindowRepository: @unchecked Sendable {
         if entries[pid]?.isEmpty == true {
             entries.removeValue(forKey: pid)
         }
-        previews.removeValue(forKey: windowID)
-        previewAccessOrder.removeAll { $0 == windowID }
     }
 
     private func computeChanges(old: Set<CapturedWindow>, new: Set<CapturedWindow>) -> ChangeReport {

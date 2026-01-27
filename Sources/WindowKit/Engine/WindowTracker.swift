@@ -168,7 +168,7 @@ public final class WindowTracker {
 
     public func refreshPreviews(for pid: pid_t) async {
         let windows = repository.readCache(forPID: pid)
-        let freshIDs = repository.windowIDsWithFreshPreviews()
+        let freshIDs = repository.windowIDsWithFreshPreviews(forPID: pid)
 
         let needsCapture = windows.filter { !freshIDs.contains($0.id) }
 
@@ -190,11 +190,11 @@ public final class WindowTracker {
         }
 
         let appWindows = content.windows.filter { $0.owningApplication?.processID == pid }
-        let freshIDs = repository.windowIDsWithFreshPreviews()
+        let freshIDs = repository.windowIDsWithFreshPreviews(forPID: pid)
 
         let results: [CapturedWindow] = await ConcurrencyHelpers.mapConcurrent(appWindows, maxConcurrent: 4, timeout: 10) { [self] scWindow -> CapturedWindow? in
             guard await isValidSCKWindow(scWindow) else { return nil }
-            return await captureFromSCKWindow(scWindow, app: app, skipPreview: freshIDs.contains(scWindow.windowID))
+            return await captureFromSCKWindow(scWindow, app: app, freshIDs: freshIDs)
         }
 
         return results
@@ -212,7 +212,7 @@ public final class WindowTracker {
     }
 
     @available(macOS 12.3, *)
-    private func captureFromSCKWindow(_ scWindow: SCWindow, app: NSRunningApplication, skipPreview: Bool) async -> CapturedWindow? {
+    private func captureFromSCKWindow(_ scWindow: SCWindow, app: NSRunningApplication, freshIDs: Set<CGWindowID>) async -> CapturedWindow? {
         let pid = app.processIdentifier
         let appElement = AXUIElement.application(pid: pid)
 
@@ -230,6 +230,8 @@ public final class WindowTracker {
         let isMinimized = (try? axWindow.isMinimized()) ?? false
         let isHidden = app.isHidden
         let spaceID = scWindow.windowID.spaces().first
+        let existingWindow = repository.readCache(windowID: scWindow.windowID)
+        let creationTime = existingWindow?.creationTime ?? Date()
 
         var window = CapturedWindow(
             id: scWindow.windowID,
@@ -242,17 +244,16 @@ public final class WindowTracker {
             isVisible: scWindow.isOnScreen,
             desktopSpace: spaceID,
             lastInteractionTime: Date(),
-            creationTime: Date(),
+            creationTime: creationTime,
             axElement: axWindow,
             appAxElement: appElement,
             closeButton: closeButton
         )
 
-        if !skipPreview {
+        if !freshIDs.contains(scWindow.windowID) {
             if let image = try? screenshotService.captureWindow(id: scWindow.windowID) {
                 window.cachedPreview = image
                 window.previewTimestamp = Date()
-                repository.storePreview(image, forWindowID: scWindow.windowID)
             }
         }
 
@@ -300,7 +301,7 @@ public final class WindowTracker {
 
         let cgCandidates = enumerator.cgDescriptors(forPID: pid)
         let activeSpaces = activeSpaceIDs()
-        let freshIDs = repository.windowIDsWithFreshPreviews()
+        let freshIDs = repository.windowIDsWithFreshPreviews(forPID: pid)
 
         var candidateWindows: [(axWindow: AXUIElement, windowID: CGWindowID, descriptor: CGWindowDescriptor)] = []
         var usedIDs = excludeIDs
@@ -361,6 +362,8 @@ public final class WindowTracker {
         let isHidden = app.isHidden
         let spaceID = windowID.spaces().first
         let closeButton = try? axWindow.closeButton()
+        let existingWindow = repository.readCache(windowID: windowID)
+        let creationTime = existingWindow?.creationTime ?? Date()
 
         var window = CapturedWindow(
             id: windowID,
@@ -373,7 +376,7 @@ public final class WindowTracker {
             isVisible: descriptor.isOnScreen,
             desktopSpace: spaceID,
             lastInteractionTime: Date(),
-            creationTime: Date(),
+            creationTime: creationTime,
             axElement: axWindow,
             appAxElement: appElement,
             closeButton: closeButton
@@ -383,7 +386,6 @@ public final class WindowTracker {
             if let image = try? screenshotService.captureWindow(id: windowID) {
                 window.cachedPreview = image
                 window.previewTimestamp = Date()
-                repository.storePreview(image, forWindowID: windowID)
             }
         }
 

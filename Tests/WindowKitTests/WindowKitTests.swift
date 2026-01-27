@@ -43,11 +43,17 @@ final class WindowKitTests: XCTestCase {
     }
 
     func testPreviewCacheConstants() {
-        XCTAssertEqual(WindowRepository.previewCacheDuration, 30.0)
-        XCTAssertEqual(WindowRepository.maxCachedPreviews, 100)
+        // Default preview cache duration
+        XCTAssertEqual(WindowRepository.defaultPreviewCacheDuration, 30.0)
+
+        // Instance property can be configured
+        let repo = WindowRepository()
+        XCTAssertEqual(repo.previewCacheDuration, 30.0)
+        repo.previewCacheDuration = 60.0
+        XCTAssertEqual(repo.previewCacheDuration, 60.0)
     }
 
-    func testRepositoryMergeStrategy() async {
+    func testRepositoryMergeStrategy() {
         // Test that store() merges windows instead of replacing them
         // This ensures windows on other spaces (not re-discovered due to CGS timing)
         // remain in cache until they fail isValidElement check
@@ -60,14 +66,14 @@ final class WindowKitTests: XCTestCase {
         let mockWindowB = makeMockWindow(id: 200, pid: pid)
         let firstScan: Set<CapturedWindow> = [mockWindowA, mockWindowB]
 
-        let changes1 = await repo.store(forPID: pid, windows: firstScan)
+        let changes1 = repo.store(forPID: pid, windows: firstScan)
         XCTAssertEqual(changes1.added.count, 2)
         XCTAssertEqual(changes1.removed.count, 0)
 
         // Simulate: second scan only finds window A (window B on other space, CGS returned empty spaces)
         let secondScan: Set<CapturedWindow> = [mockWindowA]
 
-        let changes2 = await repo.store(forPID: pid, windows: secondScan)
+        let changes2 = repo.store(forPID: pid, windows: secondScan)
         // Window B should NOT be removed - merge strategy keeps it
         XCTAssertEqual(changes2.removed.count, 0, "Merge strategy should not remove windows that weren't re-discovered")
 
