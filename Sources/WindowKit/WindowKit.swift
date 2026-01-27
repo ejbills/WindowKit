@@ -10,6 +10,21 @@ public final class WindowKit {
         set { Logger.enabled = newValue }
     }
 
+    /// Custom log handler. When set, logs are forwarded here instead of default output.
+    /// Parameters: (level: String, message: String, details: String?)
+    public var logHandler: ((String, String, String?) -> Void)? {
+        get { nil }
+        set {
+            if let handler = newValue {
+                Logger.logHandler = { level, message, details in
+                    handler(level.rawValue, message, details)
+                }
+            } else {
+                Logger.logHandler = nil
+            }
+        }
+    }
+
     public var events: AnyPublisher<WindowEvent, Never> { tracker.events }
 
     public var permissionStatus: PermissionState {

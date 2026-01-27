@@ -4,6 +4,10 @@ import os.log
 public enum Logger {
     public static var enabled: Bool = false
 
+    /// Custom log handler. When set, logs are forwarded here instead of default output.
+    /// Parameters: (level, message, details)
+    public static var logHandler: ((Level, String, String?) -> Void)?
+
     private static let osLog = OSLog(subsystem: "com.windowkit", category: "WindowKit")
 
     public enum Level: String {
@@ -15,6 +19,11 @@ public enum Logger {
 
     public static func log(_ level: Level, _ message: String, details: String? = nil) {
         guard enabled else { return }
+
+        if let handler = logHandler {
+            handler(level, message, details)
+            return
+        }
 
         let timestamp = ISO8601DateFormatter().string(from: Date())
         var output = "[\(timestamp)] [\(level.rawValue)] \(message)"
@@ -33,7 +42,9 @@ public enum Logger {
             os_log(.error, log: osLog, "%{public}@", output)
         }
 
-        print("[WindowKit] \(output)")
+        #if DEBUG
+            print("[WindowKit] \(output)")
+        #endif
     }
 
     public static func debug(_ message: String, details: String? = nil) {
