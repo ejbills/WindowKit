@@ -269,7 +269,7 @@ public final class WindowTracker {
                 _ = repository.purify(forPID: pid, validator: enumerator.isValidElement)
                 repository.modify(forPID: pid) { windows in
                     windows = Set(windows.map { window in
-                        CapturedWindow(
+                        var updated = CapturedWindow(
                             id: window.id,
                             title: window.title,
                             ownerBundleID: window.ownerBundleID,
@@ -284,6 +284,9 @@ public final class WindowTracker {
                             axElement: window.axElement,
                             appAxElement: window.appAxElement
                         )
+                        updated.cachedPreview = window.cachedPreview
+                        updated.previewTimestamp = window.previewTimestamp
+                        return updated
                     })
                 }
             }
@@ -294,7 +297,7 @@ public final class WindowTracker {
                 _ = repository.purify(forPID: pid, validator: enumerator.isValidElement)
                 repository.modify(forPID: pid) { windows in
                     windows = Set(windows.map { window in
-                        CapturedWindow(
+                        var updated = CapturedWindow(
                             id: window.id,
                             title: window.title,
                             ownerBundleID: window.ownerBundleID,
@@ -309,6 +312,9 @@ public final class WindowTracker {
                             axElement: window.axElement,
                             appAxElement: window.appAxElement
                         )
+                        updated.cachedPreview = window.cachedPreview
+                        updated.previewTimestamp = window.previewTimestamp
+                        return updated
                     })
                 }
             }
@@ -351,10 +357,16 @@ public final class WindowTracker {
             if let windowID = try? element.windowID(),
                let existing = windows.first(where: { $0.id == windowID }) {
                 windows.remove(existing)
-                windows.insert(update(existing))
+                var updated = update(existing)
+                updated.cachedPreview = existing.cachedPreview
+                updated.previewTimestamp = existing.previewTimestamp
+                windows.insert(updated)
             } else if let existing = windows.first(where: { $0.axElement == element }) {
                 windows.remove(existing)
-                windows.insert(update(existing))
+                var updated = update(existing)
+                updated.cachedPreview = existing.cachedPreview
+                updated.previewTimestamp = existing.previewTimestamp
+                windows.insert(updated)
             }
         }
         emitChanges(changes)
@@ -365,7 +377,7 @@ public final class WindowTracker {
             if let windowID = try? element.windowID(),
                let existing = windows.first(where: { $0.id == windowID }) {
                 windows.remove(existing)
-                let updated = CapturedWindow(
+                var updated = CapturedWindow(
                     id: existing.id,
                     title: existing.title,
                     ownerBundleID: existing.ownerBundleID,
@@ -380,6 +392,8 @@ public final class WindowTracker {
                     axElement: existing.axElement,
                     appAxElement: existing.appAxElement
                 )
+                updated.cachedPreview = existing.cachedPreview
+                updated.previewTimestamp = existing.previewTimestamp
                 windows.insert(updated)
             }
         }
