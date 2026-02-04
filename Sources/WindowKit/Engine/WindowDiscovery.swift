@@ -102,11 +102,15 @@ struct WindowDiscovery {
             closeButton: closeButton
         )
 
-        if !freshIDs.contains(scWindow.windowID) {
-            if let image = try? screenshotService.captureWindow(id: scWindow.windowID) {
-                window.cachedPreview = image
-                window.previewTimestamp = Date()
-            }
+        if freshIDs.contains(scWindow.windowID) {
+            window.cachedPreview = existingWindow?.cachedPreview
+            window.previewTimestamp = existingWindow?.previewTimestamp
+        } else if let image = try? screenshotService.captureWindow(id: scWindow.windowID) {
+            window.cachedPreview = image
+            window.previewTimestamp = Date()
+        } else {
+            window.cachedPreview = existingWindow?.cachedPreview
+            window.previewTimestamp = existingWindow?.previewTimestamp
         }
 
         return window
@@ -234,11 +238,15 @@ struct WindowDiscovery {
             closeButton: closeButton
         )
 
-        if !freshIDs.contains(windowID) {
-            if let image = try? screenshotService.captureWindow(id: windowID) {
-                window.cachedPreview = image
-                window.previewTimestamp = Date()
-            }
+        if freshIDs.contains(windowID) {
+            window.cachedPreview = existingWindow?.cachedPreview
+            window.previewTimestamp = existingWindow?.previewTimestamp
+        } else if let image = try? screenshotService.captureWindow(id: windowID) {
+            window.cachedPreview = image
+            window.previewTimestamp = Date()
+        } else {
+            window.cachedPreview = existingWindow?.cachedPreview
+            window.previewTimestamp = existingWindow?.previewTimestamp
         }
 
         return window
