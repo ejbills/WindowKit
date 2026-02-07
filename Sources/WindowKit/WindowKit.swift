@@ -25,6 +25,10 @@ public final class WindowKit {
         }
     }
 
+    public var headless: Bool = false {
+        didSet { tracker.headless = headless }
+    }
+
     public var previewCacheDuration: TimeInterval {
         get { tracker.repository.previewCacheDuration }
         set { tracker.repository.previewCacheDuration = newValue }

@@ -11,7 +11,11 @@ public final class WindowTracker {
     }
 
     private let eventSubject = PassthroughSubject<WindowEvent, Never>()
-    private let discovery: WindowDiscovery
+    var headless: Bool = false {
+        didSet { discovery.screenshotService.headless = headless }
+    }
+
+    private var discovery: WindowDiscovery
     private let enumerator = WindowEnumerator()
 
     private var processWatcher: ProcessWatcher?

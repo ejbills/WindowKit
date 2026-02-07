@@ -7,7 +7,7 @@ struct WindowDiscovery {
     static let minimumWindowSize = CGSize(width: 100, height: 100)
 
     let repository: WindowRepository
-    let screenshotService: ScreenshotService
+    var screenshotService: ScreenshotService
     let enumerator: WindowEnumerator
 
     func discoverAll(for app: NSRunningApplication) async -> [CapturedWindow] {

@@ -8,10 +8,12 @@ public enum ScreenshotError: Error, Sendable {
 }
 
 public struct ScreenshotService: Sendable {
+    var headless: Bool = false
+
     public init() {}
 
     public func captureWindow(id windowID: CGWindowID) throws -> CGImage {
-        guard SystemPermissions.hasScreenRecording() else {
+        guard !headless, SystemPermissions.hasScreenRecording() else {
             throw ScreenshotError.permissionDenied
         }
 
@@ -34,7 +36,7 @@ public struct ScreenshotService: Sendable {
     }
 
     public func captureBatch(_ windowIDs: [CGWindowID], concurrencyLimit: Int = 4) async -> [CGWindowID: CGImage] {
-        guard SystemPermissions.hasScreenRecording() else {
+        guard !headless, SystemPermissions.hasScreenRecording() else {
             return [:]
         }
 
