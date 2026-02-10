@@ -1,82 +1,147 @@
 # WindowKit
 
-A Swift package for macOS window discovery, tracking, manipulation, and preview capture.
+Window discovery, tracking, and manipulation for macOS.
 
-> **Warning**: This package uses private macOS APIs. It may break with any macOS update. No guarantees, no warranty, use at your own risk.
+> **Warning**: This package uses private macOS APIs. It may break with any macOS update.
 
-## Requirements
+## Installation
 
-- macOS 12.0+
-- Swift 5.9+
+Add WindowKit to your `Package.swift`:
 
-## Permissions Required
+```swift
+dependencies: [
+    .package(url: "https://github.com/ejbills/WindowKit.git", branch: "main")
+]
+```
 
-- **Accessibility**: Window manipulation
-- **Screen Recording**: Window preview capture
+Then add it to your target:
+
+```swift
+.target(name: "YourApp", dependencies: ["WindowKit"])
+```
+
+Requires macOS 12+ and Swift 5.7+.
+
+## Permissions
+
+WindowKit needs two system permissions:
+
+- **Accessibility** — window tracking and manipulation
+- **Screen Recording** — window preview capture
+
+```swift
+let status = WindowKit.shared.permissionStatus
+
+status.accessibilityGranted  // Bool
+status.screenCaptureGranted  // Bool
+status.allGranted            // both true
+
+// Prompt the user for access
+SystemPermissions.shared.requestAccessibility()
+SystemPermissions.shared.requestScreenRecording()
+
+// Or open System Settings directly
+SystemPermissions.shared.openPrivacySettings(for: .accessibility)
+SystemPermissions.shared.openPrivacySettings(for: .screenRecording)
+```
+
+`SystemPermissions.shared` is an `ObservableObject` — its `currentState` updates automatically via polling.
 
 ## Usage
-
-### Basic Setup
 
 ```swift
 import WindowKit
 
-// Start tracking windows
+// Start tracking all windows on the system
 WindowKit.shared.beginTracking()
 
-// Fetch all windows (validated - invalid windows are automatically purged)
-let windows = await WindowKit.shared.allWindows()
+// Query windows
+let all     = await WindowKit.shared.allWindows()
+let safari  = await WindowKit.shared.windows(bundleID: "com.apple.Safari")
+let byPID   = await WindowKit.shared.windows(pid: 1234)
+let byApp   = await WindowKit.shared.windows(application: someApp)
+let single  = await WindowKit.shared.window(withID: windowID)
 
-// Fetch by various criteria
-let byPID = await WindowKit.shared.windows(pid: 1234)
-let byApp = await WindowKit.shared.windows(application: someApp)
-let byBundle = await WindowKit.shared.windows(bundleID: "com.apple.Safari")
-let byID = await WindowKit.shared.window(withID: windowID)
-
-// Manual refresh (equivalent to getActiveWindows being called on dock hover in DockDoor)
+// Force a refresh for one app or everything
 await WindowKit.shared.refresh(application: someApp)
 await WindowKit.shared.refreshAll()
 
-// Stop tracking
+// Stop when done
 WindowKit.shared.endTracking()
 ```
 
-### Window Events
+### CapturedWindow
+
+Each window is a `CapturedWindow` struct:
+
+```swift
+// Identity
+window.id                  // CGWindowID
+window.title               // String?
+window.ownerBundleID       // String?
+window.ownerPID            // pid_t
+window.ownerApplication    // NSRunningApplication?
+
+// Geometry
+window.bounds              // CGRect
+
+// State
+window.isMinimized         // Bool
+window.isOwnerHidden       // Bool
+window.isVisible           // Bool
+window.desktopSpace        // Int?
+
+// Timestamps
+window.lastInteractionTime // Date
+window.creationTime        // Date
+
+// Preview
+window.preview             // CGImage?
+
+// Accessibility elements
+window.axElement           // AXUIElement (the window)
+window.appAxElement        // AXUIElement (the owning app)
+window.closeButton         // AXUIElement?
+```
+
+### Events
+
+Subscribe to window lifecycle changes via Combine:
 
 ```swift
 WindowKit.shared.events
     .sink { event in
         switch event {
         case .windowAppeared(let window):
-            print("New window: \(window.title ?? "untitled")")
-        case .windowDisappeared(let windowID):
-            print("Window closed: \(windowID)")
+            // new window discovered
+        case .windowDisappeared(let id):
+            // window closed or owning app terminated
         case .windowChanged(let window):
-            print("Window updated: \(window.title ?? "untitled")")
-        case .previewCaptured(let windowID, let image):
-            print("Preview captured for: \(windowID)")
+            // title, bounds, minimized, or hidden state changed
+        case .previewCaptured(let id, let image):
+            // screenshot captured for window
         }
     }
     .store(in: &cancellables)
 ```
 
-### Window Manipulation
+### Manipulation
 
 ```swift
 var window = await WindowKit.shared.window(withID: someID)!
 
-// Focus and bring to front
+// Focus
 try window.bringToFront()
 
-// Minimize/Restore
+// Minimize / restore
 try window.minimize()
 try window.restore()
-try window.toggleMinimize()  // Returns new state
+try window.toggleMinimize()     // returns new state
 
-// Hide/Show application
+// Hide / show the owning application
 try window.hide()
 try window.unhide()
-try window.toggleHidden()  // Returns new state
+try window.toggleHidden()       // returns new state
 
 // Fullscreen
 try window.enterFullScreen()
@@ -85,10 +150,10 @@ try window.toggleFullScreen()
 
 // Close window or quit app
 try window.close()
-window.quit()             // Graceful termination
-window.quit(force: true)  // Force termination
+window.quit()                   // graceful termination
+window.quit(force: true)        // force kill
 
-// Position and size
+// Positioning
 try window.setPosition(CGPoint(x: 100, y: 100))
 try window.setSize(CGSize(width: 800, height: 600))
 try window.setPositionAndSize(
@@ -97,68 +162,26 @@ try window.setPositionAndSize(
 )
 ```
 
-### Direct Accessibility Access
-
-For advanced use cases, you can access the underlying accessibility elements:
+## Configuration
 
 ```swift
-let window = await WindowKit.shared.window(withID: someID)!
+// Skip screenshot capture when you only need window metadata
+WindowKit.shared.headless = true
 
-// Access AX elements directly
-let axElement = window.axElement        // Window's AXUIElement
-let appElement = window.appAxElement    // App's AXUIElement
-let closeBtn = window.closeButton       // Close button (if available)
+// Control how long preview images stay cached (default 30s)
+WindowKit.shared.previewCacheDuration = 60
 
-// Perform custom AX operations
-try axElement.performAction(kAXRaiseAction)
-try axElement.setAttribute(kAXPositionAttribute, value: someValue)
+// Enable debug logging (uses os_log under the hood)
+WindowKit.shared.logging = true
+
+// Or pipe logs to your own handler
+WindowKit.shared.logHandler = { level, message, details in
+    print("[\(level)] \(message) \(details ?? "")")
+}
 ```
 
-## CapturedWindow Properties
+## License
 
-```swift
-// Identity
-window.id                 // CGWindowID
-window.title              // String?
-window.ownerBundleID      // String?
-window.ownerPID           // pid_t
-window.ownerApplication   // NSRunningApplication?
+MIT — see [LICENSE](LICENSE).
 
-// Geometry
-window.bounds             // CGRect
-
-// State
-window.isMinimized        // Bool
-window.isOwnerHidden      // Bool
-window.isVisible          // Bool
-window.desktopSpace       // Int? (space ID)
-
-// Timestamps
-window.lastInteractionTime // Date
-window.creationTime        // Date
-
-// Preview
-window.preview            // CGImage?
-
-// Accessibility (for manipulation)
-window.axElement          // AXUIElement
-window.appAxElement       // AXUIElement
-window.closeButton        // AXUIElement?
-```
-
-## Permissions
-
-Check and request permissions:
-
-```swift
-// Check current state
-let status = WindowKit.shared.permissionStatus
-print("Accessibility: \(status.accessibility)")
-print("Screen Recording: \(status.screenRecording)")
-```
-
-## License & Acknowledgements
-
-MIT
-
-Special thanks to [Louis Pontoise](https://github.com/lwouis) ([AltTab](https://github.com/lwouis/alt-tab-macos)) for graciously permitting use of his private API work under MIT.
+Thanks to [Louis Pontoise](https://github.com/lwouis) ([AltTab](https://github.com/lwouis/alt-tab-macos)) for permitting use of his private API work under MIT.
