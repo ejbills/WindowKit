@@ -21,9 +21,13 @@ public final class WindowRepository: @unchecked Sendable {
 
     public func trackedApplications() -> [NSRunningApplication] {
         cacheLock.lock()
-        let pids = Array(entries.keys)
+        let pids = entries.filter { !$0.value.isEmpty }.map(\.key)
         cacheLock.unlock()
-        return pids.compactMap { NSRunningApplication(processIdentifier: $0) }
+        return pids.compactMap { pid in
+            guard let app = NSRunningApplication(processIdentifier: pid),
+                  app.activationPolicy == .regular else { return nil }
+            return app
+        }
     }
 
     public func readCache(forPID pid: pid_t) -> [CapturedWindow] {
@@ -94,7 +98,11 @@ public final class WindowRepository: @unchecked Sendable {
             merged.insert(windowToInsert)
         }
 
-        entries[pid] = merged
+        if merged.isEmpty {
+            entries.removeValue(forKey: pid)
+        } else {
+            entries[pid] = merged
+        }
 
         Logger.debug("Store merge result", details: "pid=\(pid), old=\(oldWindows.count), discovered=\(windows.count), merged=\(merged.count)")
 
