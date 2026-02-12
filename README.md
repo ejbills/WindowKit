@@ -222,6 +222,9 @@ WindowKit.shared.headless = true
 // Control how long preview images stay cached (default 30s)
 WindowKit.shared.previewCacheDuration = 60
 
+// Ignore specific PIDs (e.g. your own app) — set before beginTracking()
+WindowKit.shared.ignoredPIDs = [ProcessInfo.processInfo.processIdentifier]
+
 // Enable debug logging (uses os_log under the hood)
 WindowKit.shared.logging = true
 

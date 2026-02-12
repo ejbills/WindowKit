@@ -96,6 +96,7 @@ public final class WindowTracker {
     @discardableResult
     public func trackApplication(_ app: NSRunningApplication) async -> [CapturedWindow] {
         let pid = app.processIdentifier
+        if repository.ignoredPIDs.contains(pid) { return [] }
         let appName = app.localizedName ?? "Unknown"
         Logger.debug("Tracking application", details: "pid=\(pid), name=\(appName)")
 
@@ -207,7 +208,11 @@ public final class WindowTracker {
                         eventSubject.send(.windowDisappeared(window.id))
                     }
                 } else {
-                    _ = repository.purify(forPID: pid, validator: enumerator.isValidElement)
+                    let before = Set(repository.readCache(forPID: pid).map(\.id))
+                    let remaining = Set(repository.purify(forPID: pid, validator: enumerator.isValidElement).map(\.id))
+                    for removedID in before.subtracting(remaining) {
+                        eventSubject.send(.windowDisappeared(removedID))
+                    }
                 }
             }
 

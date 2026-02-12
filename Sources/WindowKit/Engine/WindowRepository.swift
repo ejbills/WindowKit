@@ -15,6 +15,8 @@ public final class WindowRepository: @unchecked Sendable {
     private var entries: [pid_t: Set<CapturedWindow>] = [:]
     private let cacheLock = NSLock()
 
+    public var ignoredPIDs: Set<pid_t> = []
+
     public init() {}
 
     public func trackedApplications() -> [NSRunningApplication] {
@@ -71,6 +73,7 @@ public final class WindowRepository: @unchecked Sendable {
 
     @discardableResult
     public func store(forPID pid: pid_t, windows: Set<CapturedWindow>) -> ChangeReport {
+        if ignoredPIDs.contains(pid) { return .empty }
         cacheLock.lock()
         defer { cacheLock.unlock() }
 

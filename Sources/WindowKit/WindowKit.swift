@@ -48,6 +48,11 @@ public final class WindowKit {
         SystemPermissions.shared.currentState
     }
 
+    public var ignoredPIDs: Set<pid_t> {
+        get { tracker.repository.ignoredPIDs }
+        set { tracker.repository.ignoredPIDs = newValue }
+    }
+
     private let tracker: WindowTracker
     private var cancellables = Set<AnyCancellable>()
 
@@ -67,7 +72,7 @@ public final class WindowKit {
 
                 case .applicationTerminated(let pid):
                     self.launchingApplications.removeAll { $0.processIdentifier == pid }
-                    self.trackedApplications = self.tracker.repository.trackedApplications()
+                    self.trackedApplications.removeAll { $0.processIdentifier == pid }
 
                 case .applicationActivated:
                     self.frontmostApplication = self.tracker.frontmostApplication
