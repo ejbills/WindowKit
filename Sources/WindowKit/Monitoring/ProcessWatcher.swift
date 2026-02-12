@@ -2,6 +2,7 @@ import Cocoa
 import Combine
 
 public enum ProcessEvent: Sendable {
+    case applicationWillLaunch(NSRunningApplication)
     case applicationLaunched(NSRunningApplication)
     case applicationTerminated(pid_t)
     case applicationActivated(NSRunningApplication)
@@ -13,8 +14,11 @@ public final class ProcessWatcher {
     private let eventSubject = PassthroughSubject<ProcessEvent, Never>()
     private var observations: [NSObjectProtocol] = []
 
+    public private(set) var frontmostApplication: NSRunningApplication?
+
     public init() {
         self.events = eventSubject.eraseToAnyPublisher()
+        frontmostApplication = NSWorkspace.shared.frontmostApplication
         setupObservers()
     }
 
@@ -39,6 +43,14 @@ public final class ProcessWatcher {
         let center = NSWorkspace.shared.notificationCenter
 
         observations.append(center.addObserver(
+            forName: NSWorkspace.willLaunchApplicationNotification, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                  app.activationPolicy == .regular else { return }
+            self?.eventSubject.send(.applicationWillLaunch(app))
+        })
+
+        observations.append(center.addObserver(
             forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main
         ) { [weak self] notification in
             guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
@@ -56,8 +68,9 @@ public final class ProcessWatcher {
         observations.append(center.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
         ) { [weak self] notification in
-            guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
-            self?.eventSubject.send(.applicationActivated(app))
+            guard let self, let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+            self.frontmostApplication = app
+            self.eventSubject.send(.applicationActivated(app))
         })
 
         observations.append(center.addObserver(

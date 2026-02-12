@@ -1,6 +1,8 @@
 import Cocoa
 import Combine
+import Observation
 
+@Observable
 @MainActor
 public final class WindowKit {
     public static let shared = WindowKit()
@@ -36,14 +38,61 @@ public final class WindowKit {
 
     public var events: AnyPublisher<WindowEvent, Never> { tracker.events }
 
+    public var processEvents: AnyPublisher<ProcessEvent, Never> { tracker.processEvents }
+
+    public private(set) var frontmostApplication: NSRunningApplication?
+    public private(set) var trackedApplications: [NSRunningApplication] = []
+    public private(set) var launchingApplications: [NSRunningApplication] = []
+
     public var permissionStatus: PermissionState {
         SystemPermissions.shared.currentState
     }
 
     private let tracker: WindowTracker
+    private var cancellables = Set<AnyCancellable>()
 
     private init() {
         self.tracker = WindowTracker()
+        self.frontmostApplication = tracker.frontmostApplication
+
+        tracker.processEvents
+            .sink { [weak self] event in
+                guard let self else { return }
+                switch event {
+                case .applicationWillLaunch(let app):
+                    self.launchingApplications.append(app)
+
+                case .applicationLaunched:
+                    break
+
+                case .applicationTerminated(let pid):
+                    self.launchingApplications.removeAll { $0.processIdentifier == pid }
+                    self.trackedApplications = self.tracker.repository.trackedApplications()
+
+                case .applicationActivated:
+                    self.frontmostApplication = self.tracker.frontmostApplication
+
+                case .spaceChanged:
+                    break
+                }
+            }
+            .store(in: &cancellables)
+
+        tracker.events
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] event in
+                guard let self else { return }
+                switch event {
+                case .windowAppeared(let window):
+                    self.launchingApplications.removeAll { $0.processIdentifier == window.ownerPID }
+                    self.trackedApplications = self.tracker.repository.trackedApplications()
+                case .windowDisappeared:
+                    self.trackedApplications = self.tracker.repository.trackedApplications()
+                default:
+                    break
+                }
+            }
+            .store(in: &cancellables)
     }
 
     public func allWindows() async -> [CapturedWindow] {

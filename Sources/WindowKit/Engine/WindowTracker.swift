@@ -18,9 +18,12 @@ public final class WindowTracker {
     private var discovery: WindowDiscovery
     private let enumerator = WindowEnumerator()
 
-    private var processWatcher: ProcessWatcher?
+    private let processWatcher = ProcessWatcher()
     private var watcherManager: AccessibilityWatcherManager?
     private var subscriptions = Set<AnyCancellable>()
+
+    public var processEvents: AnyPublisher<ProcessEvent, Never> { processWatcher.events }
+    public var frontmostApplication: NSRunningApplication? { processWatcher.frontmostApplication }
 
     private var debouncedTasks: [String: Task<Void, Never>] = [:]
     private let debounceLock = NSLock()
@@ -41,10 +44,7 @@ public final class WindowTracker {
         isTracking = true
         Logger.info("Starting window tracking")
 
-        let watcher = ProcessWatcher()
-        processWatcher = watcher
-
-        watcher.events
+        processWatcher.events
             .sink { [weak self] event in
                 Task { [weak self] in
                     await self?.handleProcessEvent(event)
@@ -63,7 +63,7 @@ public final class WindowTracker {
             }
             .store(in: &subscriptions)
 
-        let apps = watcher.runningApplications()
+        let apps = processWatcher.runningApplications()
         Logger.debug("Found running applications", details: "count=\(apps.count)")
         for app in apps {
             manager.watch(pid: app.processIdentifier)
@@ -80,8 +80,6 @@ public final class WindowTracker {
         Logger.info("Stopping window tracking")
 
         subscriptions.removeAll()
-        processWatcher?.stopWatching()
-        processWatcher = nil
         watcherManager?.unwatchAll()
         watcherManager = nil
 
@@ -116,27 +114,7 @@ public final class WindowTracker {
 
         var processedPIDs = Set<pid_t>()
 
-        guard let watcher = processWatcher else {
-            let apps = NSWorkspace.shared.runningApplications.filter {
-                $0.activationPolicy == .regular
-            }
-            Logger.debug("No process watcher, scanning workspace apps", details: "count=\(apps.count)")
-
-            for app in apps {
-                _ = await trackApplication(app)
-                processedPIDs.insert(app.processIdentifier)
-            }
-
-            for pid in processedPIDs {
-                _ = repository.purify(forPID: pid, validator: enumerator.isValidElement)
-            }
-
-            let elapsed = (CFAbsoluteTimeGetCurrent() - startTime) * 1000
-            Logger.info("Full scan complete", details: "duration=\(String(format: "%.1f", elapsed))ms")
-            return
-        }
-
-        let apps = watcher.runningApplications()
+        let apps = processWatcher.runningApplications()
         for app in apps {
             _ = await trackApplication(app)
             processedPIDs.insert(app.processIdentifier)
@@ -179,6 +157,9 @@ public final class WindowTracker {
 
     private func handleProcessEvent(_ event: ProcessEvent) async {
         switch event {
+        case .applicationWillLaunch:
+            break
+
         case .applicationLaunched(let app):
             watcherManager?.watch(pid: app.processIdentifier)
             debounce(key: "refresh-\(app.processIdentifier)") { [weak self] in

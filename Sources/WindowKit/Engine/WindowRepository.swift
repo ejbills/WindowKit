@@ -17,6 +17,13 @@ public final class WindowRepository: @unchecked Sendable {
 
     public init() {}
 
+    public func trackedApplications() -> [NSRunningApplication] {
+        cacheLock.lock()
+        let pids = Array(entries.keys)
+        cacheLock.unlock()
+        return pids.compactMap { NSRunningApplication(processIdentifier: $0) }
+    }
+
     public func readCache(forPID pid: pid_t) -> [CapturedWindow] {
         cacheLock.lock()
         defer { cacheLock.unlock() }

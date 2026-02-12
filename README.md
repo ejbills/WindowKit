@@ -20,7 +20,7 @@ Then add it to your target:
 .target(name: "YourApp", dependencies: ["WindowKit"])
 ```
 
-Requires macOS 12+ and Swift 5.7+.
+Requires macOS 14+ and Swift 5.9+.
 
 ## Permissions
 
@@ -104,6 +104,34 @@ window.appAxElement        // AXUIElement (the owning app)
 window.closeButton         // AXUIElement?
 ```
 
+### Application State (Observable)
+
+`WindowKit.shared` is `@Observable` — SwiftUI views that read these properties re-render automatically with per-property granularity.
+
+```swift
+// Currently focused application (updated before .applicationActivated events emit)
+let focused = WindowKit.shared.frontmostApplication
+
+// Applications with tracked windows (derived from window cache)
+let running = WindowKit.shared.trackedApplications
+
+// Applications in the process of launching (before windows are discovered)
+let launching = WindowKit.shared.launchingApplications
+```
+
+In a SwiftUI view, just read the properties directly:
+
+```swift
+struct DockView: View {
+    var body: some View {
+        // Only re-renders when trackedApplications actually changes
+        ForEach(WindowKit.shared.trackedApplications, id: \.processIdentifier) { app in
+            AppIcon(app: app, isFocused: app == WindowKit.shared.frontmostApplication)
+        }
+    }
+}
+```
+
 ### Events
 
 Subscribe to window lifecycle changes via Combine:
@@ -120,6 +148,29 @@ WindowKit.shared.events
             // title, bounds, minimized, or hidden state changed
         case .previewCaptured(let id, let image):
             // screenshot captured for window
+        }
+    }
+    .store(in: &cancellables)
+```
+
+### Process Events
+
+Subscribe to application lifecycle events via Combine. These fire on the main queue and are always available (no `beginTracking()` required).
+
+```swift
+WindowKit.shared.processEvents
+    .sink { event in
+        switch event {
+        case .applicationWillLaunch(let app):
+            // app is about to launch
+        case .applicationLaunched(let app):
+            // app finished launching
+        case .applicationTerminated(let pid):
+            // app terminated
+        case .applicationActivated(let app):
+            // app became frontmost
+        case .spaceChanged:
+            // user switched spaces
         }
     }
     .store(in: &cancellables)
