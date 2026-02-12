@@ -199,7 +199,16 @@ public final class WindowTracker {
             debounce(key: "window-destroyed-\(pid)") { [weak self] in
                 guard let self else { return }
                 Logger.debug("Window destroyed notification, validating all windows", details: "pid=\(pid)")
-                _ = repository.purify(forPID: pid, validator: enumerator.isValidElement)
+                if app.isTerminated {
+                    Logger.debug("Application terminated during window destroy, purging all", details: "pid=\(pid)")
+                    let windows = repository.readCache(forPID: pid)
+                    repository.removeAll(forPID: pid)
+                    for window in windows {
+                        eventSubject.send(.windowDisappeared(window.id))
+                    }
+                } else {
+                    _ = repository.purify(forPID: pid, validator: enumerator.isValidElement)
+                }
             }
 
         case .windowMinimized(let element):
