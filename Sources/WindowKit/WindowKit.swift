@@ -4,6 +4,66 @@ import Observation
 
 @Observable
 @MainActor
+public final class AppWindowState {
+    public let pid: pid_t
+    private let repository: WindowRepository
+
+    // Only tracked stored property — bumped to trigger re-evaluation
+    private var version: UInt = 0
+
+    // -- Window access (read-through to repository) --
+
+    public var windows: [CapturedWindow] {
+        _ = version
+        return repository.readCache(forPID: pid).sorted {
+            $0.lastInteractionTime > $1.lastInteractionTime
+        }
+    }
+
+    public var count: Int {
+        _ = version
+        return repository.readCache(forPID: pid).count
+    }
+
+    public var hasWindows: Bool {
+        _ = version
+        return !repository.readCache(forPID: pid).isEmpty
+    }
+
+    // -- Convenience state --
+
+    public var allMinimized: Bool {
+        _ = version
+        let cached = repository.readCache(forPID: pid)
+        return !cached.isEmpty && cached.allSatisfy(\.isMinimized)
+    }
+
+    public var allHidden: Bool {
+        _ = version
+        let cached = repository.readCache(forPID: pid)
+        return !cached.isEmpty && cached.allSatisfy(\.isOwnerHidden)
+    }
+
+    public var isMinimized: Bool { allMinimized }
+    public var isHidden: Bool { allHidden }
+
+    public var visibleCount: Int {
+        _ = version
+        return repository.readCache(forPID: pid).filter {
+            !$0.isMinimized && !$0.isOwnerHidden
+        }.count
+    }
+
+    init(pid: pid_t, repository: WindowRepository) {
+        self.pid = pid
+        self.repository = repository
+    }
+
+    func invalidate() { version &+= 1 }
+}
+
+@Observable
+@MainActor
 public final class WindowKit {
     public static let shared = WindowKit()
 
@@ -55,6 +115,7 @@ public final class WindowKit {
 
     private let tracker: WindowTracker
     private var cancellables = Set<AnyCancellable>()
+    @ObservationIgnored private var appStates: [pid_t: AppWindowState] = [:]
 
     private init() {
         self.tracker = WindowTracker()
@@ -73,6 +134,7 @@ public final class WindowKit {
                 case .applicationTerminated(let pid):
                     self.launchingApplications.removeAll { $0.processIdentifier == pid }
                     self.trackedApplications.removeAll { $0.processIdentifier == pid }
+                    self.appStates[pid]?.invalidate()
 
                 case .applicationActivated:
                     self.frontmostApplication = self.tracker.frontmostApplication
@@ -91,10 +153,14 @@ public final class WindowKit {
                 case .windowAppeared(let window):
                     self.launchingApplications.removeAll { $0.processIdentifier == window.ownerPID }
                     self.trackedApplications = self.tracker.repository.trackedApplications()
-                case .windowDisappeared:
+                    self.invalidateAppState(forPID: window.ownerPID)
+                case .windowDisappeared(let id):
                     self.trackedApplications = self.tracker.repository.trackedApplications()
-                default:
-                    break
+                    self.invalidateAppState(forWindowID: id)
+                case .windowChanged(let window):
+                    self.invalidateAppState(forPID: window.ownerPID)
+                case .previewCaptured(let id, _):
+                    self.invalidateAppState(forWindowID: id)
                 }
             }
             .store(in: &cancellables)
@@ -138,5 +204,33 @@ public final class WindowKit {
 
     public func endTracking() {
         tracker.stopTracking()
+    }
+
+    // MARK: - Per-App Observable State
+
+    public func windowState(for pid: pid_t) -> AppWindowState {
+        if let existing = appStates[pid] { return existing }
+        let state = AppWindowState(pid: pid, repository: tracker.repository)
+        appStates[pid] = state
+        return state
+    }
+
+    public func windowState(for application: NSRunningApplication) -> AppWindowState {
+        windowState(for: application.processIdentifier)
+    }
+
+    private func invalidateAppState(forPID pid: pid_t) {
+        appStates[pid]?.invalidate()
+    }
+
+    private func invalidateAppState(forWindowID id: CGWindowID) {
+        if let window = tracker.repository.readCache(windowID: id) {
+            appStates[window.ownerPID]?.invalidate()
+        } else {
+            // Window already removed from repository — invalidate all existing states
+            for state in appStates.values {
+                state.invalidate()
+            }
+        }
     }
 }
