@@ -1,6 +1,7 @@
 import Cocoa
 import Combine
 import Observation
+import SwiftUI
 
 @Observable
 @MainActor
@@ -54,12 +55,21 @@ public final class AppWindowState {
         }.count
     }
 
+    /// Animation applied when state changes. Set to `nil` to disable.
+    @ObservationIgnored public var animation: Animation? = .default
+
     init(pid: pid_t, repository: WindowRepository) {
         self.pid = pid
         self.repository = repository
     }
 
-    func invalidate() { version &+= 1 }
+    func invalidate() {
+        if let animation {
+            withAnimation(animation) { version &+= 1 }
+        } else {
+            version &+= 1
+        }
+    }
 }
 
 @Observable

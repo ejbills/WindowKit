@@ -132,6 +132,41 @@ struct DockView: View {
 }
 ```
 
+### Per-App Window State
+
+`AppWindowState` is an `@Observable` object scoped to a single application. Unlike `trackedApplications` (which invalidates every view when any app changes), views reading an `AppWindowState` only re-render when that specific app's windows change. State changes are animated by default.
+
+```swift
+let state = WindowKit.shared.windowState(for: pid)
+// or
+let state = WindowKit.shared.windowState(for: someApp)
+```
+
+| Property | Type | Description |
+|---|---|---|
+| `pid` | `pid_t` | The process identifier |
+| `windows` | `[CapturedWindow]` | All windows, sorted by last interaction |
+| `count` | `Int` | Total window count |
+| `hasWindows` | `Bool` | Whether the app has any windows |
+| `visibleCount` | `Int` | Windows that aren't minimized or hidden |
+| `allMinimized` / `isMinimized` | `Bool` | All windows are minimized |
+| `allHidden` / `isHidden` | `Bool` | All windows are hidden |
+| `animation` | `Animation?` | Animation for state changes (default `.default`, set `nil` to disable) |
+
+```swift
+struct DockIcon: View {
+    let app: NSRunningApplication
+    var body: some View {
+        let state = WindowKit.shared.windowState(for: app.processIdentifier)
+        AppIconView(app: app)
+            .badge(state.count)          // only re-renders when THIS app changes
+            .opacity(state.isHidden ? 0.5 : 1.0)
+    }
+}
+```
+
+State is invalidated automatically on window appear/disappear/change, preview capture, and app termination. No data is duplicated — all properties read through to the single window repository.
+
 ### Events
 
 Subscribe to window lifecycle changes via Combine:
