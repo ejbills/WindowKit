@@ -98,7 +98,10 @@ public final class WindowKit {
     }
 
     public var headless: Bool = false {
-        didSet { tracker.headless = headless }
+        didSet {
+            SystemPermissions.headless = headless
+            tracker.headless = headless
+        }
     }
 
     public var previewCacheDuration: TimeInterval {

@@ -16,14 +16,19 @@ public final class SystemPermissions: ObservableObject, @unchecked Sendable {
     public static let shared = SystemPermissions()
 
     @Published public private(set) var currentState: PermissionState
-    private static var cachedScreenRecording: Bool = checkScreenRecordingDirect()
+    private static var cachedScreenRecording: Bool = checkScreenRecordingQuiet()
     private var timer: AnyCancellable?
     private let lock = NSLock()
+
+    /// When true, screen recording permission is never checked or requested.
+    /// All screen-recording-gated APIs (SCShareableContent, CGDisplayStream,
+    /// CGSHWCaptureWindowList) are skipped; the library runs on Accessibility only.
+    static var headless: Bool = false
 
     private init() {
         self.currentState = PermissionState(
             accessibilityGranted: Self.checkAccessibility(),
-            screenCaptureGranted: Self.cachedScreenRecording
+            screenCaptureGranted: Self.headless ? false : Self.cachedScreenRecording
         )
         startPolling()
     }
@@ -31,21 +36,28 @@ public final class SystemPermissions: ObservableObject, @unchecked Sendable {
     deinit { timer?.cancel() }
 
     public func refresh() {
-        let accessibility = Self.checkAccessibility()
-        let screenRecording = Self.checkScreenRecordingDirect()
-        lock.lock()
-        Self.cachedScreenRecording = screenRecording
-        lock.unlock()
-        DispatchQueue.main.async { [weak self] in
-            self?.currentState = PermissionState(
-                accessibilityGranted: accessibility,
-                screenCaptureGranted: screenRecording
-            )
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let accessibility = Self.checkAccessibility()
+            let screenRecording: Bool
+            if Self.headless {
+                screenRecording = false
+            } else {
+                screenRecording = Self.checkScreenRecordingQuiet()
+            }
+            self?.lock.lock()
+            Self.cachedScreenRecording = screenRecording
+            self?.lock.unlock()
+            DispatchQueue.main.async {
+                self?.currentState = PermissionState(
+                    accessibilityGranted: accessibility,
+                    screenCaptureGranted: screenRecording
+                )
+            }
         }
     }
 
     public static func hasAccessibility() -> Bool { checkAccessibility() }
-    public static func hasScreenRecording() -> Bool { cachedScreenRecording }
+    public static func hasScreenRecording() -> Bool { headless ? false : cachedScreenRecording }
 
     public func requestAccessibility() {
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
@@ -53,6 +65,10 @@ public final class SystemPermissions: ObservableObject, @unchecked Sendable {
     }
 
     public func requestScreenRecording() {
+        guard !Self.headless else {
+            Logger.debug("requestScreenRecording skipped — headless mode is active")
+            return
+        }
         _ = CGDisplayStream(
             dispatchQueueDisplay: CGMainDisplayID(),
             outputWidth: 1, outputHeight: 1,
@@ -77,17 +93,11 @@ public final class SystemPermissions: ObservableObject, @unchecked Sendable {
 
     private static func checkAccessibility() -> Bool { AXIsProcessTrusted() }
 
-    private static func checkScreenRecordingDirect() -> Bool {
-        let stream = CGDisplayStream(
-            dispatchQueueDisplay: CGMainDisplayID(),
-            outputWidth: 1, outputHeight: 1,
-            pixelFormat: Int32(kCVPixelFormatType_32BGRA),
-            properties: nil, queue: .main,
-            handler: { _, _, _, _ in }
-        )
-        let hasPermission = stream != nil
-        stream?.stop()
-        return hasPermission
+    /// Checks screen recording permission without triggering a system prompt.
+    /// Uses CGPreflightScreenCaptureAccess which silently queries the TCC database.
+    private static func checkScreenRecordingQuiet() -> Bool {
+        if headless { return false }
+        return CGPreflightScreenCaptureAccess()
     }
 
     private func startPolling() {
