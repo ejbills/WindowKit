@@ -96,6 +96,7 @@ struct WindowDiscovery {
             isFullscreen: isFullscreen,
             isOwnerHidden: isHidden,
             isVisible: scWindow.isOnScreen,
+            owningDisplayID: Self.displayID(for: scWindow.frame),
             desktopSpace: spaceID,
             lastInteractionTime: Date(),
             creationTime: creationTime,
@@ -234,6 +235,7 @@ struct WindowDiscovery {
             isFullscreen: isFullscreen,
             isOwnerHidden: isHidden,
             isVisible: descriptor.isOnScreen,
+            owningDisplayID: Self.displayID(for: descriptor.bounds),
             desktopSpace: spaceID,
             lastInteractionTime: Date(),
             creationTime: creationTime,
@@ -254,5 +256,13 @@ struct WindowDiscovery {
         }
 
         return window
+    }
+
+    static func displayID(for bounds: CGRect) -> CGDirectDisplayID? {
+        var displayID: CGDirectDisplayID = 0
+        var count: UInt32 = 0
+        let result = CGGetDisplaysWithRect(bounds, 1, &displayID, &count)
+        guard result == .success, count > 0 else { return nil }
+        return displayID
     }
 }

@@ -12,6 +12,7 @@ public struct CapturedWindow: Identifiable, Hashable, @unchecked Sendable {
     public private(set) var isFullscreen: Bool
     public private(set) var isOwnerHidden: Bool
     public let isVisible: Bool
+    public let owningDisplayID: CGDirectDisplayID?
     public let desktopSpace: Int?
     public let lastInteractionTime: Date
     public let creationTime: Date
@@ -38,6 +39,7 @@ public struct CapturedWindow: Identifiable, Hashable, @unchecked Sendable {
         isFullscreen: Bool,
         isOwnerHidden: Bool,
         isVisible: Bool,
+        owningDisplayID: CGDirectDisplayID? = nil,
         desktopSpace: Int?,
         lastInteractionTime: Date,
         creationTime: Date,
@@ -54,6 +56,7 @@ public struct CapturedWindow: Identifiable, Hashable, @unchecked Sendable {
         self.isFullscreen = isFullscreen
         self.isOwnerHidden = isOwnerHidden
         self.isVisible = isVisible
+        self.owningDisplayID = owningDisplayID
         self.desktopSpace = desktopSpace
         self.lastInteractionTime = lastInteractionTime
         self.creationTime = creationTime
