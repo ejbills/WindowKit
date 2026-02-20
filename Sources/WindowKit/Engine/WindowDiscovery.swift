@@ -80,6 +80,7 @@ struct WindowDiscovery {
         }
 
         let isMinimized = (try? axWindow.isMinimized()) ?? false
+        let isFullscreen = (try? axWindow.isFullscreen()) ?? false
         let isHidden = app.isHidden
         let spaceID = scWindow.windowID.spaces().first
         let existingWindow = repository.readCache(windowID: scWindow.windowID)
@@ -92,6 +93,7 @@ struct WindowDiscovery {
             ownerPID: pid,
             bounds: scWindow.frame,
             isMinimized: isMinimized,
+            isFullscreen: isFullscreen,
             isOwnerHidden: isHidden,
             isVisible: scWindow.isOnScreen,
             desktopSpace: spaceID,
@@ -215,6 +217,7 @@ struct WindowDiscovery {
     ) -> CapturedWindow? {
         let title = (try? axWindow.title()) ?? windowID.title()
         let isMinimized = (try? axWindow.isMinimized()) ?? false
+        let isFullscreen = (try? axWindow.isFullscreen()) ?? false
         let isHidden = app.isHidden
         let spaceID = windowID.spaces().first
         let closeButton = try? axWindow.closeButton()
@@ -228,6 +231,7 @@ struct WindowDiscovery {
             ownerPID: app.processIdentifier,
             bounds: descriptor.bounds,
             isMinimized: isMinimized,
+            isFullscreen: isFullscreen,
             isOwnerHidden: isHidden,
             isVisible: descriptor.isOnScreen,
             desktopSpace: spaceID,

@@ -9,6 +9,7 @@ public struct CapturedWindow: Identifiable, Hashable, @unchecked Sendable {
     public let ownerPID: pid_t
     public let bounds: CGRect
     public private(set) var isMinimized: Bool
+    public private(set) var isFullscreen: Bool
     public private(set) var isOwnerHidden: Bool
     public let isVisible: Bool
     public let desktopSpace: Int?
@@ -34,6 +35,7 @@ public struct CapturedWindow: Identifiable, Hashable, @unchecked Sendable {
         ownerPID: pid_t,
         bounds: CGRect,
         isMinimized: Bool,
+        isFullscreen: Bool,
         isOwnerHidden: Bool,
         isVisible: Bool,
         desktopSpace: Int?,
@@ -49,6 +51,7 @@ public struct CapturedWindow: Identifiable, Hashable, @unchecked Sendable {
         self.ownerPID = ownerPID
         self.bounds = bounds
         self.isMinimized = isMinimized
+        self.isFullscreen = isFullscreen
         self.isOwnerHidden = isOwnerHidden
         self.isVisible = isVisible
         self.desktopSpace = desktopSpace

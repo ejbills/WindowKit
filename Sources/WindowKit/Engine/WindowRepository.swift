@@ -297,6 +297,7 @@ public final class WindowRepository: @unchecked Sendable {
                   let newWindow = new.first(where: { $0.id == windowID }) else { continue }
             if oldWindow.title != newWindow.title ||
                oldWindow.isMinimized != newWindow.isMinimized ||
+               oldWindow.isFullscreen != newWindow.isFullscreen ||
                oldWindow.isOwnerHidden != newWindow.isOwnerHidden ||
                oldWindow.bounds != newWindow.bounds {
                 modified.insert(newWindow)
