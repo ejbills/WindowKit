@@ -1,5 +1,4 @@
 import Cocoa
-import Combine
 
 public struct PermissionState: Sendable, Equatable {
     public let accessibilityGranted: Bool
@@ -17,7 +16,6 @@ public final class SystemPermissions: ObservableObject, @unchecked Sendable {
 
     @Published public private(set) var currentState: PermissionState
     private static var cachedScreenRecording: Bool = checkScreenRecordingQuiet()
-    private var timer: AnyCancellable?
     private let lock = NSLock()
 
     /// When true, screen recording permission is never checked or requested.
@@ -30,10 +28,7 @@ public final class SystemPermissions: ObservableObject, @unchecked Sendable {
             accessibilityGranted: Self.checkAccessibility(),
             screenCaptureGranted: Self.headless ? false : Self.cachedScreenRecording
         )
-        startPolling()
     }
-
-    deinit { timer?.cancel() }
 
     public func refresh() {
         DispatchQueue.global(qos: .utility).async { [weak self] in
@@ -47,11 +42,13 @@ public final class SystemPermissions: ObservableObject, @unchecked Sendable {
             self?.lock.lock()
             Self.cachedScreenRecording = screenRecording
             self?.lock.unlock()
+            let newState = PermissionState(
+                accessibilityGranted: accessibility,
+                screenCaptureGranted: screenRecording
+            )
             DispatchQueue.main.async {
-                self?.currentState = PermissionState(
-                    accessibilityGranted: accessibility,
-                    screenCaptureGranted: screenRecording
-                )
+                guard self?.currentState != newState else { return }
+                self?.currentState = newState
             }
         }
     }
@@ -100,9 +97,4 @@ public final class SystemPermissions: ObservableObject, @unchecked Sendable {
         return CGPreflightScreenCaptureAccess()
     }
 
-    private func startPolling() {
-        timer = Timer.publish(every: 2.0, on: .main, in: .common)
-            .autoconnect()
-            .sink { [weak self] _ in self?.refresh() }
-    }
 }
