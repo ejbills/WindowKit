@@ -1,8 +1,5 @@
-WindowKit contains code derived from alt-tab-macos
-(https://github.com/lwouis/alt-tab-macos) by Louis Pontoise, originally
-licensed under GPL-3.0. The original author granted explicit permission
-(January 10, 2026) to relicense the derived portions under MIT for use in
-this package.
+WindowKit contains code derived from alt-tab-macos (https://github.com/lwouis/alt-tab-macos) by Louis Pontoise, originally licensed under GPL-3.0. 
 
-Derived portions include AXUIElement extensions and private API declarations
-from alt-tab-macos's window discovery implementation.
+The original author granted explicit permission (January 10, 2026) to relicense the derived portions under MIT for use in this package.
+
+Derived portions include AXUIElement extensions and private API declarations from alt-tab-macos's window discovery implementation.
