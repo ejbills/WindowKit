@@ -270,7 +270,7 @@ public final class WindowTracker {
             debounce(key: "app-hidden-\(pid)") { [weak self] in
                 guard let self else { return }
                 _ = repository.purify(forPID: pid, validator: enumerator.isValidElement)
-                repository.modify(forPID: pid) { windows in
+                let changes = repository.modify(forPID: pid) { windows in
                     windows = Set(windows.map { window in
                         var updated = CapturedWindow(
                             id: window.id,
@@ -294,13 +294,14 @@ public final class WindowTracker {
                         return updated
                     })
                 }
+                emitChanges(changes)
             }
 
         case .applicationRevealed:
             debounce(key: "app-revealed-\(pid)") { [weak self] in
                 guard let self else { return }
                 _ = repository.purify(forPID: pid, validator: enumerator.isValidElement)
-                repository.modify(forPID: pid) { windows in
+                let changes = repository.modify(forPID: pid) { windows in
                     windows = Set(windows.map { window in
                         var updated = CapturedWindow(
                             id: window.id,
@@ -324,6 +325,7 @@ public final class WindowTracker {
                         return updated
                     })
                 }
+                emitChanges(changes)
             }
 
         case .windowFocused(let element), .mainWindowChanged(let element):
