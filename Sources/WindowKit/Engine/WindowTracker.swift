@@ -198,11 +198,15 @@ public final class WindowTracker {
             }
 
         case .windowDestroyed:
+            debounceLock.lock()
             pendingDestroyPIDs.insert(pid)
+            debounceLock.unlock()
             debounce(key: "window-destroyed") { [weak self] in
                 guard let self else { return }
+                debounceLock.lock()
                 let pids = pendingDestroyPIDs
                 pendingDestroyPIDs.removeAll()
+                debounceLock.unlock()
                 for pid in pids {
                     guard let app = NSRunningApplication(processIdentifier: pid) else { continue }
                     Logger.debug("Window destroyed notification, validating all windows", details: "pid=\(pid)")
