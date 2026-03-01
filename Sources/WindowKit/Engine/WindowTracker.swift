@@ -27,6 +27,7 @@ public final class WindowTracker {
 
     private var debouncedTasks: [String: Task<Void, Never>] = [:]
     private let debounceLock = NSLock()
+    private var pendingDestroyPIDs = Set<pid_t>()
     private var isTracking = false
 
     public init() {
@@ -197,21 +198,27 @@ public final class WindowTracker {
             }
 
         case .windowDestroyed:
-            debounce(key: "window-destroyed-\(pid)") { [weak self] in
+            pendingDestroyPIDs.insert(pid)
+            debounce(key: "window-destroyed") { [weak self] in
                 guard let self else { return }
-                Logger.debug("Window destroyed notification, validating all windows", details: "pid=\(pid)")
-                if app.isTerminated {
-                    Logger.debug("Application terminated during window destroy, purging all", details: "pid=\(pid)")
-                    let windows = repository.readCache(forPID: pid)
-                    repository.removeAll(forPID: pid)
-                    for window in windows {
-                        eventSubject.send(.windowDisappeared(window.id))
-                    }
-                } else {
-                    let before = Set(repository.readCache(forPID: pid).map(\.id))
-                    let remaining = Set(repository.purify(forPID: pid, validator: enumerator.isValidElement).map(\.id))
-                    for removedID in before.subtracting(remaining) {
-                        eventSubject.send(.windowDisappeared(removedID))
+                let pids = pendingDestroyPIDs
+                pendingDestroyPIDs.removeAll()
+                for pid in pids {
+                    guard let app = NSRunningApplication(processIdentifier: pid) else { continue }
+                    Logger.debug("Window destroyed notification, validating all windows", details: "pid=\(pid)")
+                    if app.isTerminated {
+                        Logger.debug("Application terminated during window destroy, purging all", details: "pid=\(pid)")
+                        let windows = repository.readCache(forPID: pid)
+                        repository.removeAll(forPID: pid)
+                        for window in windows {
+                            eventSubject.send(.windowDisappeared(window.id))
+                        }
+                    } else {
+                        let before = Set(repository.readCache(forPID: pid).map(\.id))
+                        let remaining = Set(repository.purify(forPID: pid, validator: enumerator.isValidElement).map(\.id))
+                        for removedID in before.subtracting(remaining) {
+                            eventSubject.send(.windowDisappeared(removedID))
+                        }
                     }
                 }
             }
