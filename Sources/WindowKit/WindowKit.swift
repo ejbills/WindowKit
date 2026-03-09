@@ -273,10 +273,18 @@ public final class WindowKit {
     }
 
     private func refreshAllBadges() {
+        var refreshed = Set<pid_t>()
+
         for app in trackedApplications {
             let pid = app.processIdentifier
             badgeStore.refresh(forPID: pid)
             appStates[pid]?.invalidate()
+            refreshed.insert(pid)
+        }
+
+        for (pid, state) in appStates where !refreshed.contains(pid) {
+            badgeStore.refresh(forPID: pid)
+            state.invalidate()
         }
     }
 }
