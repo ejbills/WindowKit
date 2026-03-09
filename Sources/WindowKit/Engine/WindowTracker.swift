@@ -189,6 +189,9 @@ public final class WindowTracker {
                 await self?.refreshApplication(app)
             }
 
+        case .applicationDeactivated:
+            break
+
         case .spaceChanged:
             debounce(key: "space-change") { [weak self] in
                 await self?.performFullScan()

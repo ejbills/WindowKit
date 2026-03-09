@@ -171,6 +171,11 @@ public final class WindowKit {
                         self.refreshBadge(forPID: pid)
                     }
 
+                case .applicationDeactivated(let app):
+                    let pid = app.processIdentifier
+                    self.refreshBadge(forPID: pid)
+                    self.appStates[pid]?.invalidate()
+
                 case .spaceChanged:
                     break
                 }

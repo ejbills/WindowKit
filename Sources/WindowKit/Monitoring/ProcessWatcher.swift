@@ -6,6 +6,7 @@ public enum ProcessEvent: Sendable {
     case applicationLaunched(NSRunningApplication)
     case applicationTerminated(pid_t)
     case applicationActivated(NSRunningApplication)
+    case applicationDeactivated(NSRunningApplication)
     case spaceChanged
 }
 
@@ -73,6 +74,14 @@ public final class ProcessWatcher {
                   app.activationPolicy == .regular else { return }
             self.frontmostApplication = app
             self.eventSubject.send(.applicationActivated(app))
+        })
+
+        observations.append(center.addObserver(
+            forName: NSWorkspace.didDeactivateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                  app.activationPolicy == .regular else { return }
+            self?.eventSubject.send(.applicationDeactivated(app))
         })
 
         observations.append(center.addObserver(
