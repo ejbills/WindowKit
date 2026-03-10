@@ -68,6 +68,12 @@ public final class AppWindowState {
         return badgeStore.badge(forPID: pid) != nil
     }
 
+    public var badgeCount: Int? {
+        _ = version
+        guard let label = badgeStore.badge(forPID: pid) else { return nil }
+        return Int(label)
+    }
+
     /// Animation applied when state changes. Set to `nil` to disable.
     @ObservationIgnored public var animation: Animation? = .default
 

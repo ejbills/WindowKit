@@ -152,6 +152,7 @@ let state = WindowKit.shared.windowState(for: someApp)
 | `allMinimized` / `isMinimized` | `Bool` | All windows are minimized |
 | `allHidden` / `isHidden` | `Bool` | All windows are hidden |
 | `badgeLabel` | `String?` | Dock badge text (`"3"` for counts, `""` for dot-only, `nil` for none) |
+| `badgeCount` | `Int?` | Numeric badge count parsed from `badgeLabel`, `nil` if absent or non-numeric |
 | `hasBadge` | `Bool` | Whether the app has a Dock badge |
 | `animation` | `Animation?` | Animation for state changes (default `.default`, set `nil` to disable) |
 
