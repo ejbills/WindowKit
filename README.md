@@ -250,6 +250,20 @@ try window.setPositionAndSize(
 )
 ```
 
+### Badge Polling
+
+Dock badges update automatically via event-driven triggers (app activation, notification banners, window changes). However, some apps like Messages and Microsoft Teams update their dock badge silently without firing a notification banner. To catch these, enable badge polling:
+
+```swift
+// Start 1-second polling for dock badge changes
+WindowKit.shared.startBadgePolling()
+
+// Stop when no longer needed (also stops automatically on endTracking())
+WindowKit.shared.stopBadgePolling()
+```
+
+Polling reads `AXStatusLabel` from cached dock element references, so each tick is lightweight. Only app states whose badge actually changed are invalidated.
+
 ## Configuration
 
 ```swift

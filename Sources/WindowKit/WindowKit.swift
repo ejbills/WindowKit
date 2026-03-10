@@ -144,6 +144,7 @@ public final class WindowKit {
     private let badgeStore = DockBadgeStore()
     private var cancellables = Set<AnyCancellable>()
     @ObservationIgnored private var appStates: [pid_t: AppWindowState] = [:]
+    private var badgePollTimer: Timer?
 
     private init() {
         self.tracker = WindowTracker()
@@ -158,11 +159,13 @@ public final class WindowKit {
 
                 case .applicationLaunched:
                     self.trackedApplications = self.tracker.repository.trackedApplications()
+                    self.badgeStore.invalidateCache()
 
                 case .applicationTerminated(let pid):
                     self.launchingApplications.removeAll { $0.processIdentifier == pid }
                     self.trackedApplications.removeAll { $0.processIdentifier == pid }
                     self.badgeStore.removeBadge(forPID: pid)
+                    self.badgeStore.invalidateCache()
                     self.appStates[pid]?.invalidate()
 
                 case .applicationActivated:
@@ -199,7 +202,7 @@ public final class WindowKit {
                 case .previewCaptured(let id, _):
                     self.invalidateAppState(forWindowID: id)
                 case .notificationBannerChanged:
-                    self.refreshAllBadges()
+                    self.refreshAllBadgesAndInvalidate()
                 }
             }
             .store(in: &cancellables)
@@ -242,7 +245,23 @@ public final class WindowKit {
     }
 
     public func endTracking() {
+        stopBadgePolling()
         tracker.stopTracking()
+    }
+
+    /// Starts a 1-second polling timer that continuously reads dock badge state for all tracked apps.
+    public func startBadgePolling() {
+        stopBadgePolling()
+        badgePollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.refreshAllBadges()
+            }
+        }
+    }
+
+    public func stopBadgePolling() {
+        badgePollTimer?.invalidate()
+        badgePollTimer = nil
     }
 
     // MARK: - Per-App Observable State
@@ -278,6 +297,19 @@ public final class WindowKit {
     }
 
     private func refreshAllBadges() {
+        var allPIDs = trackedApplications.map(\.processIdentifier)
+        for pid in appStates.keys where !allPIDs.contains(pid) {
+            allPIDs.append(pid)
+        }
+
+        let changed = badgeStore.refreshAll(pids: allPIDs)
+        for pid in changed {
+            appStates[pid]?.invalidate()
+        }
+    }
+
+    /// Unconditionally refreshes all badges and invalidates all states (for event-driven triggers).
+    private func refreshAllBadgesAndInvalidate() {
         var refreshed = Set<pid_t>()
 
         for app in trackedApplications {
@@ -292,4 +324,5 @@ public final class WindowKit {
             state.invalidate()
         }
     }
+
 }
