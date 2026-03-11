@@ -151,6 +151,7 @@ public final class WindowKit {
     private var cancellables = Set<AnyCancellable>()
     @ObservationIgnored private var appStates: [pid_t: AppWindowState] = [:]
     private var badgePollTimer: Timer?
+    private let badgeQueue = DispatchQueue(label: "com.windowkit.badge", qos: .userInitiated)
 
     private init() {
         self.tracker = WindowTracker()
@@ -303,7 +304,14 @@ public final class WindowKit {
     }
 
     private func refreshBadge(forPID pid: pid_t) {
-        badgeStore.refresh(forPID: pid)
+        badgeQueue.async { [badgeStore, weak self] in
+            let changed = badgeStore.refresh(forPID: pid)
+            if changed {
+                Task { @MainActor [weak self] in
+                    self?.appStates[pid]?.invalidate()
+                }
+            }
+        }
     }
 
     private func refreshAllBadges() {
@@ -312,26 +320,41 @@ public final class WindowKit {
             allPIDs.append(pid)
         }
 
-        let changed = badgeStore.refreshAll(pids: allPIDs)
-        for pid in changed {
-            appStates[pid]?.invalidate()
+        let pids = allPIDs
+        badgeQueue.async { [badgeStore, weak self] in
+            let changed = badgeStore.refreshAll(pids: pids)
+            if !changed.isEmpty {
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    for pid in changed {
+                        self.appStates[pid]?.invalidate()
+                    }
+                }
+            }
         }
     }
 
     /// Unconditionally refreshes all badges and invalidates all states (for event-driven triggers).
     private func refreshAllBadgesAndInvalidate() {
-        var refreshed = Set<pid_t>()
+        let trackedPIDs = trackedApplications.map(\.processIdentifier)
+        let statePIDs = Array(appStates.keys)
 
-        for app in trackedApplications {
-            let pid = app.processIdentifier
-            badgeStore.refresh(forPID: pid)
-            appStates[pid]?.invalidate()
-            refreshed.insert(pid)
-        }
+        badgeQueue.async { [badgeStore, weak self] in
+            var allPIDs = Set(trackedPIDs)
+            for pid in statePIDs {
+                allPIDs.insert(pid)
+            }
 
-        for (pid, state) in appStates where !refreshed.contains(pid) {
-            badgeStore.refresh(forPID: pid)
-            state.invalidate()
+            for pid in allPIDs {
+                badgeStore.refresh(forPID: pid)
+            }
+
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                for pid in allPIDs {
+                    self.appStates[pid]?.invalidate()
+                }
+            }
         }
     }
 
