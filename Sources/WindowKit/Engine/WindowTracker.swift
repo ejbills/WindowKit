@@ -231,21 +231,7 @@ public final class WindowTracker {
                 await self?.refreshApplication(app)
             }
 
-        case .windowDestroyed(let element):
-            let enumerator = self.enumerator
-            axQueue.async {
-                let elementWindowID = try? element.windowID()
-                let elementValid = enumerator.isValidElement(element)
-                Logger.debug("windowDestroyed raw event", details: "pid=\(pid), elementWindowID=\(elementWindowID.map(String.init) ?? "nil"), elementStillValid=\(elementValid)")
-            }
-
-            let cachedBefore = repository.readCache(forPID: pid)
-            Logger.debug("Cache before destroy handling", details: "pid=\(pid), count=\(cachedBefore.count), ids=\(cachedBefore.map(\.id))")
-
-            if let app = NSRunningApplication(processIdentifier: pid) {
-                Logger.debug("App state at destroy time", details: "pid=\(pid), name=\(app.localizedName ?? "?"), policy=\(app.activationPolicy.rawValue), terminated=\(app.isTerminated), hidden=\(app.isHidden)")
-            }
-
+        case .windowDestroyed:
             pendingDestroyPIDs.withLockUnchecked { _ = $0.insert(pid) }
             debounce(key: "window-destroyed") { [weak self] in
                 guard let self else { return }

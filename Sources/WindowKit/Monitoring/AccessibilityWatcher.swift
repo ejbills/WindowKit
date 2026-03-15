@@ -2,6 +2,10 @@ import ApplicationServices
 import Cocoa
 import Combine
 
+private let axObserverWorkQueue = DispatchQueue(label: "com.windowkit.axObserverWork", qos: .userInitiated)
+private var pendingNotifications: [String: DispatchWorkItem] = [:]
+private let notificationDebounceInterval: TimeInterval = 0.1
+
 public enum AccessibilityEvent {
     case windowCreated(AXUIElement)
     case windowDestroyed(AXUIElement)
@@ -66,6 +70,14 @@ public final class AccessibilityWatcher {
         )
 
         self.observer = nil
+
+        let pid = targetPID
+        axObserverWorkQueue.async {
+            for (key, workItem) in pendingNotifications where key.hasPrefix("\(pid)-") {
+                workItem.cancel()
+                pendingNotifications.removeValue(forKey: key)
+            }
+        }
     }
 
     private func setupObserver() -> Bool {
@@ -104,35 +116,49 @@ public final class AccessibilityWatcher {
     }
 
     private func handleNotification(element: AXUIElement, name: String) {
-        let event: AccessibilityEvent? = switch name {
-        case kAXWindowCreatedNotification:
-            .windowCreated(element)
-        case kAXUIElementDestroyedNotification:
-            .windowDestroyed(element)
-        case kAXWindowMiniaturizedNotification:
-            .windowMinimized(element)
-        case kAXWindowDeminiaturizedNotification:
-            .windowRestored(element)
-        case kAXApplicationHiddenNotification:
-            .applicationHidden
-        case kAXApplicationShownNotification:
-            .applicationRevealed
-        case kAXFocusedWindowChangedNotification:
-            .windowFocused(element)
-        case kAXWindowResizedNotification:
-            .windowResized(element)
-        case kAXWindowMovedNotification:
-            .windowMoved(element)
-        case kAXTitleChangedNotification:
-            .titleChanged(element)
-        case kAXMainWindowChangedNotification:
-            .mainWindowChanged(element)
-        default:
-            nil
-        }
+        let key = "\(targetPID)-\(name)"
 
-        if let event = event {
-            eventSubject.send(event)
+        axObserverWorkQueue.async { [weak self] in
+            guard let self else { return }
+
+            pendingNotifications[key]?.cancel()
+
+            let event: AccessibilityEvent? = switch name {
+            case kAXWindowCreatedNotification:
+                .windowCreated(element)
+            case kAXUIElementDestroyedNotification:
+                .windowDestroyed(element)
+            case kAXWindowMiniaturizedNotification:
+                .windowMinimized(element)
+            case kAXWindowDeminiaturizedNotification:
+                .windowRestored(element)
+            case kAXApplicationHiddenNotification:
+                .applicationHidden
+            case kAXApplicationShownNotification:
+                .applicationRevealed
+            case kAXFocusedWindowChangedNotification:
+                .windowFocused(element)
+            case kAXWindowResizedNotification:
+                .windowResized(element)
+            case kAXWindowMovedNotification:
+                .windowMoved(element)
+            case kAXTitleChangedNotification:
+                .titleChanged(element)
+            case kAXMainWindowChangedNotification:
+                .mainWindowChanged(element)
+            default:
+                nil
+            }
+
+            guard let event else { return }
+
+            let workItem = DispatchWorkItem { [weak self] in
+                pendingNotifications.removeValue(forKey: key)
+                self?.eventSubject.send(event)
+            }
+
+            pendingNotifications[key] = workItem
+            axObserverWorkQueue.asyncAfter(deadline: .now() + notificationDebounceInterval, execute: workItem)
         }
     }
 }
