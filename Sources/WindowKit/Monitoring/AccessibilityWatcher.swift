@@ -80,6 +80,12 @@ public final class AccessibilityWatcher {
         }
     }
 
+    @discardableResult
+    public func reset() -> Bool {
+        stopWatching()
+        return setupObserver()
+    }
+
     private func setupObserver() -> Bool {
         var newObserver: AXObserver?
 
@@ -216,6 +222,22 @@ public final class AccessibilityWatcherManager {
         }
         subscriptions.removeAll()
         watchers.removeAll()
+    }
+
+    public func resetAll() {
+        lock.lock()
+        let pids = Array(watchers.keys)
+        lock.unlock()
+
+        for pid in pids {
+            lock.lock()
+            let watcher = watchers[pid]
+            lock.unlock()
+
+            if let watcher, !watcher.reset() {
+                unwatch(pid: pid)
+            }
+        }
     }
 
     public func isWatching(pid: pid_t) -> Bool {

@@ -31,6 +31,7 @@ public final class WindowTracker {
     private let axQueue = DispatchQueue(label: "com.windowkit.ax", qos: .userInitiated)
     private var notificationCenterWatcher: AccessibilityWatcher?
     private var isTracking = false
+    private var wakeObserver: NSObjectProtocol?
 
     public init() {
         let repository = WindowRepository()
@@ -74,6 +75,7 @@ public final class WindowTracker {
         }
 
         startNotificationCenterWatcher()
+        startWakeObserver()
 
         Task { [weak self] in
             await self?.performFullScan()
@@ -90,6 +92,7 @@ public final class WindowTracker {
         watcherManager = nil
         notificationCenterWatcher?.stopWatching()
         notificationCenterWatcher = nil
+        stopWakeObserver()
 
         let tasks = debouncedTasks.withLockUnchecked { tasks -> [String: Task<Void, Never>] in
             let snapshot = tasks
@@ -482,6 +485,29 @@ public final class WindowTracker {
                 await operation()
             }
         }
+    }
+
+    // MARK: - System Wake Recovery
+
+    private func startWakeObserver() {
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self, self.isTracking else { return }
+            Logger.info("System wake detected, resetting AX observers")
+            self.watcherManager?.resetAll()
+            self.notificationCenterWatcher?.reset()
+            Task { [weak self] in
+                await self?.performFullScan()
+            }
+        }
+    }
+
+    private func stopWakeObserver() {
+        if let wakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
+        }
+        wakeObserver = nil
     }
 
     // MARK: - Notification Center Banner Watcher
