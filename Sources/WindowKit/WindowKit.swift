@@ -146,12 +146,17 @@ public final class WindowKit {
         set { tracker.repository.ignoredPIDs = newValue }
     }
 
+    private static let launchTimeoutSeconds: TimeInterval = 30
+
     private let tracker: WindowTracker
     private let badgeStore = DockBadgeStore()
     private var cancellables = Set<AnyCancellable>()
     @ObservationIgnored private var appStates: [pid_t: AppWindowState] = [:]
     private var badgePollTimer: Timer?
     private let badgeQueue = DispatchQueue(label: "com.windowkit.badge", qos: .userInitiated)
+    private var badgeRefreshInFlight = false
+    private var wakeCooldownWork: DispatchWorkItem?
+    private var launchTimeoutWork: [pid_t: DispatchWorkItem] = [:]
 
     private init() {
         self.tracker = WindowTracker()
@@ -163,12 +168,14 @@ public final class WindowKit {
                 switch event {
                 case .applicationWillLaunch(let app):
                     self.launchingApplications.append(app)
+                    self.scheduleLaunchTimeout(for: app.processIdentifier)
 
                 case .applicationLaunched:
                     self.trackedApplications = self.tracker.repository.trackedApplications()
                     self.badgeStore.invalidateCache()
 
                 case .applicationTerminated(let pid):
+                    self.cancelLaunchTimeout(for: pid)
                     self.launchingApplications.removeAll { $0.processIdentifier == pid }
                     self.trackedApplications.removeAll { $0.processIdentifier == pid }
                     self.badgeStore.removeBadge(forPID: pid)
@@ -198,6 +205,7 @@ public final class WindowKit {
                 guard let self else { return }
                 switch event {
                 case .windowAppeared(let window):
+                    self.cancelLaunchTimeout(for: window.ownerPID)
                     self.launchingApplications.removeAll { $0.processIdentifier == window.ownerPID }
                     self.trackedApplications = self.tracker.repository.trackedApplications()
                     self.invalidateAppState(forPID: window.ownerPID)
@@ -213,6 +221,28 @@ public final class WindowKit {
                 }
             }
             .store(in: &cancellables)
+
+        NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didWakeNotification)
+            .sink { [weak self] _ in
+                self?.handleWake()
+            }
+            .store(in: &cancellables)
+    }
+
+    private func scheduleLaunchTimeout(for pid: pid_t) {
+        launchTimeoutWork[pid]?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.launchTimeoutWork[pid] = nil
+            self.launchingApplications.removeAll { $0.processIdentifier == pid }
+        }
+        launchTimeoutWork[pid] = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.launchTimeoutSeconds, execute: work)
+    }
+
+    private func cancelLaunchTimeout(for pid: pid_t) {
+        launchTimeoutWork[pid]?.cancel()
+        launchTimeoutWork[pid] = nil
     }
 
     public func allWindows() async -> [CapturedWindow] {
@@ -271,8 +301,21 @@ public final class WindowKit {
     }
 
     public func stopBadgePolling() {
+        wakeCooldownWork?.cancel()
+        wakeCooldownWork = nil
         badgePollTimer?.invalidate()
         badgePollTimer = nil
+    }
+
+    private func handleWake() {
+        guard badgePollTimer != nil else { return }
+        stopBadgePolling()
+        badgeStore.invalidateCache()
+        let work = DispatchWorkItem { [weak self] in
+            self?.startBadgePolling()
+        }
+        wakeCooldownWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0, execute: work)
     }
 
     // MARK: - Per-App Observable State
@@ -315,6 +358,9 @@ public final class WindowKit {
     }
 
     private func refreshAllBadges() {
+        guard !badgeRefreshInFlight else { return }
+        badgeRefreshInFlight = true
+
         var allPIDs = trackedApplications.map(\.processIdentifier)
         for pid in appStates.keys where !allPIDs.contains(pid) {
             allPIDs.append(pid)
@@ -323,12 +369,11 @@ public final class WindowKit {
         let pids = allPIDs
         badgeQueue.async { [badgeStore, weak self] in
             let changed = badgeStore.refreshAll(pids: pids)
-            if !changed.isEmpty {
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    for pid in changed {
-                        self.appStates[pid]?.invalidate()
-                    }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.badgeRefreshInFlight = false
+                for pid in changed {
+                    self.appStates[pid]?.invalidate()
                 }
             }
         }

@@ -7,6 +7,7 @@ public final class DockBadgeStore: @unchecked Sendable {
 
     /// Cached dock AXUIElement references keyed by app name for fast polling.
     private var cachedDockElements: [String: AXUIElement] = [:]
+    private var lastRebuildTime: CFAbsoluteTime = 0
 
     public init() {}
 
@@ -73,6 +74,8 @@ public final class DockBadgeStore: @unchecked Sendable {
         let cache = cachedDockElements
         lock.unlock()
 
+        guard !cache.isEmpty else { return [] }
+
         for (name, pid) in pidsByName {
             if let element = cache[name] {
                 let statusLabel = try? element.attribute("AXStatusLabel", as: String.self)
@@ -98,6 +101,7 @@ public final class DockBadgeStore: @unchecked Sendable {
     public func invalidateCache() {
         lock.lock()
         cachedDockElements.removeAll()
+        lastRebuildTime = 0
         lock.unlock()
     }
 
@@ -110,6 +114,14 @@ public final class DockBadgeStore: @unchecked Sendable {
     }
 
     private func rebuildCache() {
+        lock.lock()
+        let now = CFAbsoluteTimeGetCurrent()
+        if now - lastRebuildTime < 2.0 {
+            lock.unlock()
+            return
+        }
+        lock.unlock()
+
         guard let dockPID = NSWorkspace.shared.runningApplications
             .first(where: { $0.bundleIdentifier == "com.apple.dock" })?
             .processIdentifier else { return }
@@ -120,6 +132,7 @@ public final class DockBadgeStore: @unchecked Sendable {
               let dockItems = try? list.children() else { return }
 
         lock.lock()
+        lastRebuildTime = CFAbsoluteTimeGetCurrent()
         cachedDockElements.removeAll()
         for item in dockItems {
             guard let subrole = try? item.subrole(),
