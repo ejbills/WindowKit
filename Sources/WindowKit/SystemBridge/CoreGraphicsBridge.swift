@@ -88,9 +88,41 @@ private typealias SLPSPostEventRecordToType = @convention(c) (
     UnsafeMutablePointer<UInt8>
 ) -> CGError
 
+// SkyLight space management types
+
+private typealias SLSSpaceCreateType = @convention(c) (
+    CGSConnectionID, Int32, Int32
+) -> CGSSpaceID
+
+private typealias SLSSpaceSetAbsoluteLevelType = @convention(c) (
+    CGSConnectionID, CGSSpaceID, Int32
+) -> Void
+
+private typealias SLSShowSpacesType = @convention(c) (
+    CGSConnectionID, CFArray
+) -> Void
+
+private typealias SLSSpaceAddWindowsAndRemoveFromSpacesType = @convention(c) (
+    CGSConnectionID, CGSSpaceID, CFArray, Int32
+) -> Void
+
+enum SLSSpaceAbsoluteLevel: Int32 {
+    case `default` = 0
+    case setupAssistant = 100
+    case securityAgent = 200
+    case screenLock = 300
+    case notificationCenterAtScreenLock = 400
+    case bootProgress = 500
+    case voiceOver = 600
+}
+
 private var skyLightHandle: UnsafeMutableRawPointer?
 private var setFrontProcessPtr: SLPSSetFrontProcessWithOptionsType?
 private var postEventRecordPtr: SLPSPostEventRecordToType?
+private var spaceCreatePtr: SLSSpaceCreateType?
+private var spaceSetAbsoluteLevelPtr: SLSSpaceSetAbsoluteLevelType?
+private var showSpacesPtr: SLSShowSpacesType?
+private var spaceAddWindowsPtr: SLSSpaceAddWindowsAndRemoveFromSpacesType?
 
 private func loadSkyLightFunctions() {
     guard skyLightHandle == nil else { return }
@@ -108,6 +140,22 @@ private func loadSkyLightFunctions() {
 
     if let symbol = dlsym(handle, "SLPSPostEventRecordTo") {
         postEventRecordPtr = unsafeBitCast(symbol, to: SLPSPostEventRecordToType.self)
+    }
+
+    if let symbol = dlsym(handle, "SLSSpaceCreate") {
+        spaceCreatePtr = unsafeBitCast(symbol, to: SLSSpaceCreateType.self)
+    }
+
+    if let symbol = dlsym(handle, "SLSSpaceSetAbsoluteLevel") {
+        spaceSetAbsoluteLevelPtr = unsafeBitCast(symbol, to: SLSSpaceSetAbsoluteLevelType.self)
+    }
+
+    if let symbol = dlsym(handle, "SLSShowSpaces") {
+        showSpacesPtr = unsafeBitCast(symbol, to: SLSShowSpacesType.self)
+    }
+
+    if let symbol = dlsym(handle, "SLSSpaceAddWindowsAndRemoveFromSpaces") {
+        spaceAddWindowsPtr = unsafeBitCast(symbol, to: SLSSpaceAddWindowsAndRemoveFromSpacesType.self)
     }
 }
 
@@ -240,6 +288,40 @@ public func cgWindowDescriptors(forPID pid: pid_t) -> [CGWindowDescriptor] {
         }
         return descriptor
     }
+}
+
+// MARK: - SkyLight Space Management
+
+func slsCreateSpace(_ connection: CGSConnectionID) -> CGSSpaceID? {
+    loadSkyLightFunctions()
+    guard let fn = spaceCreatePtr else { return nil }
+    let spaceID = fn(connection, 1, 0)
+    return spaceID != 0 ? spaceID : nil
+}
+
+func slsSetSpaceAbsoluteLevel(
+    _ connection: CGSConnectionID,
+    _ spaceID: CGSSpaceID,
+    _ level: SLSSpaceAbsoluteLevel
+) {
+    loadSkyLightFunctions()
+    spaceSetAbsoluteLevelPtr?(connection, spaceID, level.rawValue)
+}
+
+func slsShowSpaces(_ connection: CGSConnectionID, _ spaceIDs: [CGSSpaceID]) {
+    loadSkyLightFunctions()
+    let cfArray = spaceIDs.map { NSNumber(value: $0) } as CFArray
+    showSpacesPtr?(connection, cfArray)
+}
+
+func slsSpaceAddWindows(
+    _ connection: CGSConnectionID,
+    _ spaceID: CGSSpaceID,
+    _ windowIDs: [CGWindowID]
+) {
+    loadSkyLightFunctions()
+    let cfArray = windowIDs.map { NSNumber(value: $0) } as CFArray
+    spaceAddWindowsPtr?(connection, spaceID, cfArray, 7)
 }
 
 public func activeSpaceIDs() -> Set<Int> {
