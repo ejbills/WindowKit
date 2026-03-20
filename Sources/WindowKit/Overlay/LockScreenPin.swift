@@ -2,6 +2,22 @@ import Cocoa
 import Combine
 import SwiftUI
 
+// MARK: - Lock Screen Anchor
+
+/// Describes where the pinned content appears on the lock screen.
+public enum LockScreenAnchor: Sendable {
+    /// Centered on screen.
+    case center
+    /// Centered horizontally, offset vertically from center (positive = up).
+    case aboveCenter(offset: CGFloat = 160)
+    /// Fixed origin in screen coordinates.
+    case origin(x: CGFloat, y: CGFloat)
+    /// Alignment-based positioning with optional padding from screen edges.
+    case aligned(horizontal: HorizontalAlignment, vertical: VerticalAlignment, padding: CGFloat = 20)
+    /// Client provides the full frame in screen coordinates.
+    case frame(NSRect)
+}
+
 // MARK: - Lock Screen Pin Manager
 
 @MainActor
@@ -13,9 +29,9 @@ public final class LockScreenPinManager {
     public private(set) var isShowingOnLockScreen: Bool = false
 
     private var overlayWindow: TopmostWindow?
-    private var overlayController: NSWindowController?
     private var pinnedContent: AnyView?
     private var pinnedScreen: NSScreen?
+    private var pinnedAnchor: LockScreenAnchor = .center
     private var cancellable: AnyCancellable?
 
     private init() {
@@ -26,11 +42,16 @@ public final class LockScreenPinManager {
             }
     }
 
-    public func pin<V: View>(_ content: V, on screen: NSScreen? = nil) {
+    public func pin<V: View>(
+        _ content: V,
+        anchor: LockScreenAnchor = .center,
+        on screen: NSScreen? = nil
+    ) {
         unpinIfNeeded()
 
         pinnedContent = AnyView(content)
         pinnedScreen = screen ?? NSScreen.main
+        pinnedAnchor = anchor
         isPinned = true
         Logger.info("LockScreenPin: pinned content")
 
@@ -44,11 +65,15 @@ public final class LockScreenPinManager {
         Logger.info("LockScreenPin: unpinned content")
     }
 
-    public func toggle<V: View>(_ content: V, on screen: NSScreen? = nil) {
+    public func toggle<V: View>(
+        _ content: V,
+        anchor: LockScreenAnchor = .center,
+        on screen: NSScreen? = nil
+    ) {
         if isPinned {
             unpin()
         } else {
-            pin(content, on: screen)
+            pin(content, anchor: anchor, on: screen)
         }
     }
 
@@ -75,9 +100,20 @@ public final class LockScreenPinManager {
         let screen = pinnedScreen ?? NSScreen.main ?? NSScreen.screens.first
         guard let screen else { return }
 
-        let window = TopmostWindow(contentRect: screen.frame)
         let hostingView = NSHostingView(rootView: content)
-        hostingView.frame = NSRect(origin: .zero, size: screen.frame.size)
+        let fittingSize = hostingView.fittingSize
+        let contentSize = NSSize(
+            width: max(fittingSize.width, 1),
+            height: max(fittingSize.height, 1)
+        )
+        let windowRect = resolveFrame(
+            anchor: pinnedAnchor,
+            contentSize: contentSize,
+            screen: screen
+        )
+
+        let window = TopmostWindow(contentRect: windowRect)
+        hostingView.frame = NSRect(origin: .zero, size: windowRect.size)
         window.contentView = hostingView
         window.orderFrontRegardless()
 
@@ -93,12 +129,50 @@ public final class LockScreenPinManager {
         overlayWindow = nil
         isShowingOnLockScreen = false
     }
+
+    private func resolveFrame(
+        anchor: LockScreenAnchor,
+        contentSize: NSSize,
+        screen: NSScreen
+    ) -> NSRect {
+        let sf = screen.frame
+        let w = contentSize.width
+        let h = contentSize.height
+
+        switch anchor {
+        case .center:
+            return NSRect(x: sf.midX - w / 2, y: sf.midY - h / 2, width: w, height: h)
+
+        case .aboveCenter(let offset):
+            return NSRect(x: sf.midX - w / 2, y: sf.midY + offset - h / 2, width: w, height: h)
+
+        case .origin(let x, let y):
+            return NSRect(x: sf.origin.x + x, y: sf.origin.y + y, width: w, height: h)
+
+        case .aligned(let horiz, let vert, let padding):
+            let x: CGFloat = switch horiz {
+            case .leading: sf.minX + padding
+            case .trailing: sf.maxX - w - padding
+            default: sf.midX - w / 2
+            }
+            let y: CGFloat = switch vert {
+            case .top: sf.maxY - h - padding
+            case .bottom: sf.minY + padding
+            default: sf.midY - h / 2
+            }
+            return NSRect(x: x, y: y, width: w, height: h)
+
+        case .frame(let rect):
+            return rect
+        }
+    }
 }
 
 // MARK: - SwiftUI View Modifier
 
 struct LockScreenPinModifier<PinnedContent: View>: ViewModifier {
     let pinnedContent: PinnedContent
+    let anchor: LockScreenAnchor
     let label: String
 
     @State private var isPinned = false
@@ -109,7 +183,7 @@ struct LockScreenPinModifier<PinnedContent: View>: ViewModifier {
                 Button {
                     isPinned.toggle()
                     if isPinned {
-                        LockScreenPinManager.shared.pin(pinnedContent)
+                        LockScreenPinManager.shared.pin(pinnedContent, anchor: anchor)
                     } else {
                         LockScreenPinManager.shared.unpin()
                     }
@@ -134,28 +208,19 @@ struct LockScreenPinModifier<PinnedContent: View>: ViewModifier {
 
 public extension View {
     /// Adds a right-click context menu option to pin this view to the lock screen.
-    ///
-    /// When pinned and the screen locks, the view is displayed in a topmost overlay
-    /// window above the lock screen. When the screen unlocks, the overlay is hidden.
-    ///
-    /// - Parameters:
-    ///   - label: The context menu label. Defaults to "Pin to Lock Screen".
-    ///   - content: The view to display on the lock screen. Defaults to `self`.
     func pinnableToLockScreen(
+        anchor: LockScreenAnchor = .center,
         label: String = "Pin to Lock Screen"
     ) -> some View {
-        modifier(LockScreenPinModifier(pinnedContent: self, label: label))
+        modifier(LockScreenPinModifier(pinnedContent: self, anchor: anchor, label: label))
     }
 
     /// Adds a right-click context menu option to pin custom content to the lock screen.
-    ///
-    /// - Parameters:
-    ///   - label: The context menu label. Defaults to "Pin to Lock Screen".
-    ///   - content: A closure returning the view to display on the lock screen.
     func pinnableToLockScreen<V: View>(
+        anchor: LockScreenAnchor = .center,
         label: String = "Pin to Lock Screen",
         @ViewBuilder content: () -> V
     ) -> some View {
-        modifier(LockScreenPinModifier(pinnedContent: content(), label: label))
+        modifier(LockScreenPinModifier(pinnedContent: content(), anchor: anchor, label: label))
     }
 }
