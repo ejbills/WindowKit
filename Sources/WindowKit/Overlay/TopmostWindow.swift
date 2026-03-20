@@ -17,14 +17,14 @@ final class TopmostWindow: NSWindow {
         hasShadow = false
         titleVisibility = .hidden
         titlebarAppearsTransparent = true
-        isMovable = false
+        isMovable = true
+        isMovableByWindowBackground = true
         level = NSWindow.Level(rawValue: Int(Int32.max) - 2)
         canBecomeVisibleWithoutLogin = true
         ignoresMouseEvents = false
 
         collectionBehavior = [
             .fullScreenAuxiliary,
-            .stationary,
             .canJoinAllSpaces,
             .ignoresCycle,
         ]
