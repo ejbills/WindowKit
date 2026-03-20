@@ -148,8 +148,9 @@ public final class OverlayManager {
     private func dismissWindow() {
         if let window = overlayWindow {
             lastWindowFrame = window.frame
+            window.contentView = nil
+            window.orderOut(nil)
         }
-        overlayWindow?.orderOut(nil)
         overlayWindow = nil
         isShowing = false
     }
