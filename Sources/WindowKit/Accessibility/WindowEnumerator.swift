@@ -151,6 +151,10 @@ public struct WindowEnumerator {
         }
 
         if !windowSpaces.isEmpty && windowSpaces.isDisjoint(with: activeSpaces) {
+            if !isOnScreen && !isMinimized && !isFullscreen && !app.isHidden {
+                Logger.debug("Rejecting ghost window with stale space ID", details: "id=\(windowID), app=\(app.localizedName ?? "?")")
+                return false
+            }
             return true
         }
 
