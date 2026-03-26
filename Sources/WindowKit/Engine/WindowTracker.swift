@@ -265,7 +265,24 @@ public final class WindowTracker {
                 }
                 for pid in pids {
                     guard let app = NSRunningApplication(processIdentifier: pid) else { continue }
-                    Logger.debug("Window destroyed debounced handler", details: "pid=\(pid), policy=\(app.activationPolicy.rawValue), terminated=\(app.isTerminated)")
+                    Logger.debug("Window destroyed debounced handler", details: "pid=\(pid), policy=\(app.activationPolicy.rawValue), terminated=\(app.isTerminated), hidden=\(app.isHidden)")
+
+                    // App is hidden — AXUIElementDestroyed is a side-effect of the
+                    // hide transition, not a real window close. Skip entirely.
+                    if app.isHidden {
+                        Logger.debug("Skipping destroy — app is hidden", details: "pid=\(pid)")
+                        continue
+                    }
+
+                    // If all cached windows are minimized, ignore the destroy.
+                    // macOS cannot close a minimized window natively; only our own
+                    // closeWindow() (which uses suppress, not purify) can do that.
+                    let cached = repository.readCache(forPID: pid)
+                    if !cached.isEmpty, cached.allSatisfy(\.isMinimized) {
+                        Logger.debug("Skipping destroy — all windows minimized", details: "pid=\(pid), count=\(cached.count)")
+                        continue
+                    }
+
                     if app.isTerminated || app.activationPolicy != .regular {
                         Logger.debug("App terminated or no longer .regular during destroy, purging all", details: "pid=\(pid)")
                         let windows = repository.readCache(forPID: pid)

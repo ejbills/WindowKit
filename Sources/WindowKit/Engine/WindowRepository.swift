@@ -207,7 +207,7 @@ public final class WindowRepository: @unchecked Sendable {
             // Only remove if the current entry still has the same axElement we validated
             var removed = [CGWindowID]()
             for (windowID, staleElement) in invalidElements {
-                if let current = entries[pid]?.first(where: { $0.id == windowID }),
+                if let current = (entries[pid] ?? []).first(where: { $0.id == windowID }),
                    current.axElement == staleElement {
                     removeEntryInternal(pid: pid, windowID: windowID)
                     removed.append(windowID)
