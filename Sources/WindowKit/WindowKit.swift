@@ -265,6 +265,52 @@ public final class WindowKit {
         try tracker.closeWindow(window)
     }
 
+    /// Quits the application owning `window`, then polls until the process is
+    /// confirmed dead before purging state. If the app ignores the quit after
+    /// `timeout`, state is left intact.
+    public func quitApplication(owning window: CapturedWindow, force: Bool = false, timeout: TimeInterval = 5) {
+        let pid = window.ownerPID
+        guard let app = window.ownerApplication else { return }
+
+        if force {
+            app.forceTerminate()
+        } else {
+            app.terminate()
+        }
+
+        Task { [weak self] in
+            let deadline = Date().addingTimeInterval(timeout)
+            while Date() < deadline {
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                if app.isTerminated {
+                    await MainActor.run { [weak self] in
+                        self?.purgeTerminatedApp(pid: pid)
+                    }
+                    return
+                }
+            }
+            // App didn't quit — leave state intact
+            Logger.debug("App ignored quit request", details: "pid=\(pid)")
+        }
+    }
+
+    /// Removes all state for a PID that is confirmed dead.
+    private func purgeTerminatedApp(pid: pid_t) {
+        cancelLaunchTimeout(for: pid)
+        launchingApplications.removeAll { $0.processIdentifier == pid }
+        trackedApplications.removeAll { $0.processIdentifier == pid }
+        badgeStore.removeBadge(forPID: pid)
+        badgeStore.invalidateCache()
+        appStates[pid]?.invalidate()
+        appStates.removeValue(forKey: pid)
+
+        let windows = tracker.repository.readCache(forPID: pid)
+        tracker.repository.removeAll(forPID: pid)
+        for window in windows {
+            invalidateAppState(forWindowID: window.id)
+        }
+    }
+
     public func refresh(application: NSRunningApplication) async {
         await tracker.refreshApplication(application)
     }
