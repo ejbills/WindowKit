@@ -915,21 +915,6 @@ final class ProcessWatcherTests: XCTestCase {
             watcher.stopWatching()
         }
     }
-
-    func testShowDesktopInitialState() {
-        let watcher = ProcessWatcher()
-        XCTAssertFalse(watcher.isShowingDesktop)
-        watcher.stopWatching()
-    }
-
-    func testDockObserverSurvivesStartStopCycles() {
-        let watcher = ProcessWatcher()
-        for _ in 0..<50 {
-            watcher.startWatching()
-            XCTAssertFalse(watcher.isShowingDesktop)
-            watcher.stopWatching()
-        }
-    }
 }
 
 // =============================================================================

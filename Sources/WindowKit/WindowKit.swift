@@ -187,7 +187,7 @@ public final class WindowKit {
                     self.refreshBadge(forPID: pid)
                     self.appStates[pid]?.invalidate()
 
-                case .spaceChanged, .showDesktopEntered, .showDesktopExited:
+                case .spaceChanged:
                     break
                 }
             }
