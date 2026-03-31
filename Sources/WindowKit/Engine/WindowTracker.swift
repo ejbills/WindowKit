@@ -281,13 +281,11 @@ public final class WindowTracker {
                     guard let app = NSRunningApplication(processIdentifier: pid) else { continue }
                     Logger.debug("Window destroyed debounced handler", details: "pid=\(pid), policy=\(app.activationPolicy.rawValue), terminated=\(app.isTerminated), hidden=\(app.isHidden)")
 
-                    // AXUIElementDestroyed during hide is a side-effect, not a real close.
                     if app.isHidden {
                         Logger.debug("Skipping destroy — app is hidden", details: "pid=\(pid)")
                         continue
                     }
 
-                    // macOS can't close minimized windows; only our closeWindow() (via suppress) can.
                     let cached = repository.readCache(forPID: pid)
                     if !cached.isEmpty, cached.allSatisfy(\.isMinimized) {
                         Logger.debug("Skipping destroy — all windows minimized", details: "pid=\(pid), count=\(cached.count)")
@@ -302,21 +300,17 @@ public final class WindowTracker {
                             eventSubject.send(.windowDisappeared(window.id))
                         }
                     } else {
-                        let before = repository.readCache(forPID: pid)
-                        Logger.debug("Purify starting", details: "pid=\(pid), cached=\(before.map { "id=\($0.id) title=\($0.title ?? "nil")" })")
-                        let remaining = await withCheckedContinuation { continuation in
-                            self.axQueue.async {
-                                let result = self.repository.purify(forPID: pid, validator: self.enumerator.isValidElement)
-                                continuation.resume(returning: result)
+                        // Filter cached windows in-place using isValidElement, matching
+                        // DockDoor's approach: no expensive purify/re-discovery cycle.
+                        let changes = repository.modify(forPID: pid) { windows in
+                            let before = windows
+                            windows = windows.filter { self.enumerator.isValidElement($0.axElement) }
+                            let removedCount = before.count - windows.count
+                            if removedCount > 0 {
+                                Logger.debug("Filtered invalid windows", details: "pid=\(pid), removed=\(removedCount)")
                             }
                         }
-                        let beforeIDs = Set(before.map(\.id))
-                        let remainingIDs = Set(remaining.map(\.id))
-                        let removedIDs = beforeIDs.subtracting(remainingIDs)
-                        Logger.debug("Purify result", details: "pid=\(pid), before=\(beforeIDs), remaining=\(remainingIDs), removed=\(removedIDs)")
-                        for removedID in removedIDs {
-                            eventSubject.send(.windowDisappeared(removedID))
-                        }
+                        emitChanges(changes)
                     }
                 }
             }
@@ -324,7 +318,6 @@ public final class WindowTracker {
         case .windowMinimized(let element):
             debounce(key: "window-minimized-\(pid)") { [weak self] in
                 guard let self else { return }
-                _ = repository.purify(forPID: pid, validator: enumerator.isValidElement)
                 updateWindowState(element: element, pid: pid) { window in
                     CapturedWindow(
                         id: window.id,
@@ -349,7 +342,6 @@ public final class WindowTracker {
         case .windowRestored(let element):
             debounce(key: "window-restored-\(pid)") { [weak self] in
                 guard let self else { return }
-                _ = repository.purify(forPID: pid, validator: enumerator.isValidElement)
                 updateWindowState(element: element, pid: pid) { window in
                     CapturedWindow(
                         id: window.id,
@@ -374,7 +366,6 @@ public final class WindowTracker {
         case .applicationHidden:
             debounce(key: "app-hidden-\(pid)") { [weak self] in
                 guard let self else { return }
-                _ = repository.purify(forPID: pid, validator: enumerator.isValidElement)
                 let changes = repository.modify(forPID: pid) { windows in
                     windows = Set(windows.map { window in
                         var updated = CapturedWindow(
@@ -405,7 +396,6 @@ public final class WindowTracker {
         case .applicationRevealed:
             debounce(key: "app-revealed-\(pid)") { [weak self] in
                 guard let self else { return }
-                _ = repository.purify(forPID: pid, validator: enumerator.isValidElement)
                 let changes = repository.modify(forPID: pid) { windows in
                     windows = Set(windows.map { window in
                         var updated = CapturedWindow(
