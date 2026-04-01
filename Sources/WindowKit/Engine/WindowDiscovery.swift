@@ -1,14 +1,43 @@
 import Cocoa
 import ScreenCaptureKit
 
-/// Performs window discovery work off the main thread.
-/// All methods here run on the cooperative thread pool, not the main actor.
 struct WindowDiscovery {
     static let minimumWindowSize = CGSize(width: 100, height: 100)
+    static let axWorkQueue = DispatchQueue(label: "com.windowkit.axDiscovery", qos: .userInitiated)
 
     let repository: WindowRepository
     var screenshotService: ScreenshotService
     let enumerator: WindowEnumerator
+
+    /// Runs synchronous work on axWorkQueue, guaranteed off main thread.
+    private func onAXQueue<T: Sendable>(_ work: @escaping @Sendable () -> T) async -> T {
+        await withCheckedContinuation { continuation in
+            Self.axWorkQueue.async {
+                continuation.resume(returning: work())
+            }
+        }
+    }
+
+    /// Skips windows already in cache; only discovers genuinely new ones.
+    func discoverNew(for app: NSRunningApplication) async -> [CapturedWindow] {
+        let pid = app.processIdentifier
+        let cachedIDs = Set(repository.readCache(forPID: pid).map(\.id))
+        var discoveredWindows: [CapturedWindow] = []
+
+        if #available(macOS 12.3, *), SystemPermissions.hasScreenRecording() {
+            if let sckWindows = await discoverViaSCK(for: app, skipIDs: cachedIDs) {
+                Logger.debug("SCK new-window discovery complete", details: "pid=\(pid), found=\(sckWindows.count)")
+                discoveredWindows.append(contentsOf: sckWindows)
+            }
+        }
+
+        let sckWindowIDs = Set(discoveredWindows.map(\.id))
+        let axWindows = await discoverViaAccessibility(for: app, excludeIDs: cachedIDs.union(sckWindowIDs))
+        Logger.debug("AX new-window discovery complete", details: "pid=\(pid), found=\(axWindows.count)")
+        discoveredWindows.append(contentsOf: axWindows)
+
+        return discoveredWindows
+    }
 
     func discoverAll(for app: NSRunningApplication) async -> [CapturedWindow] {
         let pid = app.processIdentifier
@@ -30,7 +59,7 @@ struct WindowDiscovery {
     }
 
     @available(macOS 12.3, *)
-    private func discoverViaSCK(for app: NSRunningApplication) async -> [CapturedWindow]? {
+    private func discoverViaSCK(for app: NSRunningApplication, skipIDs: Set<CGWindowID> = []) async -> [CapturedWindow]? {
         let pid = app.processIdentifier
 
         let contentResult: SCShareableContent? = await ConcurrencyHelpers.withTimeoutOptional {
@@ -41,12 +70,16 @@ struct WindowDiscovery {
             return nil
         }
 
-        let appWindows = content.windows.filter { $0.owningApplication?.processID == pid }
+        let appWindows = content.windows.filter {
+            $0.owningApplication?.processID == pid && !skipIDs.contains($0.windowID)
+        }
         let freshIDs = repository.windowIDsWithFreshPreviews(forPID: pid)
 
         let results: [CapturedWindow] = await ConcurrencyHelpers.mapConcurrent(appWindows, maxConcurrent: 4, timeout: 10) { scWindow -> CapturedWindow? in
             guard self.isValidSCKWindow(scWindow) else { return nil }
-            return self.captureFromSCKWindow(scWindow, app: app, freshIDs: freshIDs)
+            return await self.onAXQueue {
+                self.captureFromSCKWindow(scWindow, app: app, freshIDs: freshIDs)
+            }
         }
 
         return results
@@ -166,71 +199,66 @@ struct WindowDiscovery {
 
     func discoverViaAccessibility(for app: NSRunningApplication, excludeIDs: Set<CGWindowID>) async -> [CapturedWindow] {
         let pid = app.processIdentifier
-        let appElement = AXUIElement.application(pid: pid)
-        let axWindows = enumerator.enumerateWindows(forPID: pid)
-
-        guard !axWindows.isEmpty else { return [] }
-
-        let cgCandidates = enumerator.cgDescriptors(forPID: pid)
-        let activeSpaces = activeSpaceIDs()
         let freshIDs = repository.windowIDsWithFreshPreviews(forPID: pid)
 
-        var candidateWindows: [(axWindow: AXUIElement, windowID: CGWindowID, descriptor: CGWindowDescriptor)] = []
-        var usedIDs = excludeIDs
+        let candidateWindows: [(axWindow: AXUIElement, windowID: CGWindowID, descriptor: CGWindowDescriptor)] = await onAXQueue {
+            let appElement = AXUIElement.application(pid: pid)
+            _ = appElement // used later in capture
+            let axWindows = enumerator.enumerateWindows(forPID: pid)
+            guard !axWindows.isEmpty else { return [] }
 
-        for axWindow in axWindows {
-            let axTitle = try? axWindow.title()
-            let axRole = try? axWindow.role()
-            let axSubrole = try? axWindow.subrole()
-            let axSize = try? axWindow.size()
-            let axPos = try? axWindow.position()
+            let cgCandidates = enumerator.cgDescriptors(forPID: pid)
+            let activeSpaces = activeSpaceIDs()
 
-            guard enumerator.meetsDiscoveryCriteria(axWindow) else {
-                Logger.debug("AX window failed meetsDiscoveryCriteria", details: "pid=\(pid), title=\(axTitle ?? "nil"), role=\(axRole ?? "nil"), subrole=\(axSubrole ?? "nil"), size=\(axSize.map(String.init(describing:)) ?? "nil"), pos=\(axPos.map(String.init(describing:)) ?? "nil")")
-                continue
+            var candidates: [(axWindow: AXUIElement, windowID: CGWindowID, descriptor: CGWindowDescriptor)] = []
+            var usedIDs = excludeIDs
+
+            for axWindow in axWindows {
+                guard enumerator.meetsDiscoveryCriteria(axWindow) else { continue }
+
+                guard let windowID = enumerator.resolveWindowID(axWindow, candidates: cgCandidates, excludedIDs: usedIDs) else {
+                    continue
+                }
+
+                guard !excludeIDs.contains(windowID) else { continue }
+
+                guard let descriptor = cgCandidates.first(where: { $0.windowID == windowID }),
+                      enumerator.meetsDiscoveryCriteria(windowID: windowID, descriptor: descriptor) else {
+                    continue
+                }
+
+                guard enumerator.shouldAcceptWindow(
+                    element: axWindow,
+                    windowID: windowID,
+                    descriptor: descriptor,
+                    app: app,
+                    activeSpaces: activeSpaces,
+                    isScreenCaptureKitBacked: false
+                ) else {
+                    continue
+                }
+
+                Logger.debug("AX window accepted", details: "pid=\(pid), id=\(windowID), bounds=\(descriptor.bounds)")
+                usedIDs.insert(windowID)
+                candidates.append((axWindow, windowID, descriptor))
             }
-
-            guard let windowID = enumerator.resolveWindowID(axWindow, candidates: cgCandidates, excludedIDs: usedIDs) else {
-                Logger.debug("AX window failed resolveWindowID", details: "pid=\(pid), title=\(axTitle ?? "nil")")
-                continue
-            }
-
-            guard !excludeIDs.contains(windowID) else {
-                Logger.debug("AX window excluded (already in SCK)", details: "pid=\(pid), id=\(windowID), title=\(axTitle ?? "nil")")
-                continue
-            }
-
-            guard let descriptor = cgCandidates.first(where: { $0.windowID == windowID }),
-                  enumerator.meetsDiscoveryCriteria(windowID: windowID, descriptor: descriptor) else {
-                Logger.debug("AX window failed CG criteria", details: "pid=\(pid), id=\(windowID), title=\(axTitle ?? "nil")")
-                continue
-            }
-
-            guard enumerator.shouldAcceptWindow(
-                element: axWindow,
-                windowID: windowID,
-                descriptor: descriptor,
-                app: app,
-                activeSpaces: activeSpaces,
-                isScreenCaptureKitBacked: false
-            ) else {
-                continue
-            }
-
-            Logger.debug("AX window accepted", details: "pid=\(pid), id=\(windowID), title=\(axTitle ?? "nil"), bounds=\(descriptor.bounds), onScreen=\(descriptor.isOnScreen), alpha=\(descriptor.alpha)")
-            usedIDs.insert(windowID)
-            candidateWindows.append((axWindow, windowID, descriptor))
+            return candidates
         }
 
+        guard !candidateWindows.isEmpty else { return [] }
+
+        let appElement = AXUIElement.application(pid: pid)
         let results = await ConcurrencyHelpers.mapConcurrent(candidateWindows, maxConcurrent: 4, timeout: 10) { candidate in
-            self.captureAXWindow(
-                candidate.axWindow,
-                windowID: candidate.windowID,
-                descriptor: candidate.descriptor,
-                app: app,
-                appElement: appElement,
-                freshIDs: freshIDs
-            )
+            await self.onAXQueue {
+                self.captureAXWindow(
+                    candidate.axWindow,
+                    windowID: candidate.windowID,
+                    descriptor: candidate.descriptor,
+                    app: app,
+                    appElement: appElement,
+                    freshIDs: freshIDs
+                )
+            }
         }
 
         return results

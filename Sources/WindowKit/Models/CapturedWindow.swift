@@ -77,120 +77,166 @@ public struct CapturedWindow: Identifiable, Hashable, @unchecked Sendable {
 }
 
 extension CapturedWindow {
-    public mutating func bringToFront() throws {
+    private static let axManipulationQueue = DispatchQueue(label: "com.windowkit.axManipulation", qos: .userInitiated)
+
+    private static func offMain<T>(_ work: @escaping () throws -> T) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            axManipulationQueue.async {
+                do {
+                    continuation.resume(returning: try work())
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    public mutating func bringToFront() async throws {
         guard let app = ownerApplication else {
             throw WindowManipulationError.applicationNotFound
         }
 
-        // Unhide the app if it's hidden
-        if app.isHidden {
-            app.unhide()
-            isOwnerHidden = false
+        let axEl = axElement
+        let wid = id
+        let pid = ownerPID
+
+        let (newHidden, newMinimized) = try await Self.offMain {
+            var hidden = app.isHidden
+            var minimized = false
+            if hidden {
+                app.unhide()
+                hidden = false
+            }
+            if (try? axEl.isMinimized()) == true {
+                try axEl.setAttribute(kAXMinimizedAttribute, value: false)
+                minimized = false
+            }
+
+            var psn = ProcessSerialNumber()
+            _ = GetProcessForPID(pid, &psn)
+            _ = _SLPSSetFrontProcessWithOptions(&psn, wid, SLPSMode.userGenerated.rawValue)
+
+            var bytes = [UInt8](repeating: 0, count: 0xF8)
+            bytes[0x04] = 0xF8
+            bytes[0x3A] = 0x10
+            var widCopy = UInt32(wid)
+            memcpy(&bytes[0x3C], &widCopy, MemoryLayout<UInt32>.size)
+            memset(&bytes[0x20], 0xFF, 0x10)
+            bytes[0x08] = 0x01
+            _ = SLPSPostEventRecordTo(&psn, &bytes)
+            bytes[0x08] = 0x02
+            _ = SLPSPostEventRecordTo(&psn, &bytes)
+
+            try axEl.performAction(kAXRaiseAction)
+            try axEl.setAttribute(kAXMainAttribute, value: true)
+            app.activate()
+            return (hidden, minimized)
         }
-
-        // Unminimize the window if it's minimized
-        if (try? axElement.isMinimized()) == true {
-            try axElement.setAttribute(kAXMinimizedAttribute, value: false)
-            isMinimized = false
-        }
-
-        var psn = ProcessSerialNumber()
-        _ = GetProcessForPID(ownerPID, &psn)
-        _ = _SLPSSetFrontProcessWithOptions(&psn, id, SLPSMode.userGenerated.rawValue)
-
-        makeKeyWindow(&psn)
-
-        try axElement.performAction(kAXRaiseAction)
-        try axElement.setAttribute(kAXMainAttribute, value: true)
-
-        app.activate()
-    }
-
-    private func makeKeyWindow(_ psn: UnsafeMutablePointer<ProcessSerialNumber>) {
-        var bytes = [UInt8](repeating: 0, count: 0xF8)
-        bytes[0x04] = 0xF8
-        bytes[0x3A] = 0x10
-        var wid = UInt32(id)
-        memcpy(&bytes[0x3C], &wid, MemoryLayout<UInt32>.size)
-        memset(&bytes[0x20], 0xFF, 0x10)
-        bytes[0x08] = 0x01
-        _ = SLPSPostEventRecordTo(psn, &bytes)
-        bytes[0x08] = 0x02
-        _ = SLPSPostEventRecordTo(psn, &bytes)
+        isOwnerHidden = newHidden
+        if !newMinimized { isMinimized = false }
     }
 
     @discardableResult
-    public mutating func toggleMinimize() throws -> Bool {
+    public mutating func toggleMinimize() async throws -> Bool {
+        let axEl = axElement
         if isMinimized {
             if let app = ownerApplication, app.isHidden {
                 app.unhide()
             }
-            try axElement.setAttribute(kAXMinimizedAttribute, value: false)
+            try await Self.offMain {
+                try axEl.setAttribute(kAXMinimizedAttribute, value: false)
+            }
             ownerApplication?.activate()
-            try bringToFront()
+            try await bringToFront()
             isMinimized = false
             return false
         } else {
-            try axElement.setAttribute(kAXMinimizedAttribute, value: true)
+            try await Self.offMain {
+                try axEl.setAttribute(kAXMinimizedAttribute, value: true)
+            }
             isMinimized = true
             return true
         }
     }
 
-    public mutating func minimize() throws {
+    public mutating func minimize() async throws {
         guard !isMinimized else { return }
-        try axElement.setAttribute(kAXMinimizedAttribute, value: true)
+        let axEl = axElement
+        try await Self.offMain {
+            try axEl.setAttribute(kAXMinimizedAttribute, value: true)
+        }
         isMinimized = true
     }
 
-    public mutating func restore() throws {
+    public mutating func restore() async throws {
         guard isMinimized else { return }
         if let app = ownerApplication, app.isHidden {
             app.unhide()
         }
-        try axElement.setAttribute(kAXMinimizedAttribute, value: false)
+        let axEl = axElement
+        try await Self.offMain {
+            try axEl.setAttribute(kAXMinimizedAttribute, value: false)
+        }
         ownerApplication?.activate()
-        try bringToFront()
+        try await bringToFront()
         isMinimized = false
     }
 
     @discardableResult
-    public mutating func toggleHidden() throws -> Bool {
+    public mutating func toggleHidden() async throws -> Bool {
         let newHiddenState = !isOwnerHidden
-        try appAxElement.setAttribute(kAXHiddenAttribute, value: newHiddenState)
+        let appAx = appAxElement
+        try await Self.offMain {
+            try appAx.setAttribute(kAXHiddenAttribute, value: newHiddenState)
+        }
         if !newHiddenState {
             ownerApplication?.activate()
-            try bringToFront()
+            try await bringToFront()
         }
         isOwnerHidden = newHiddenState
         return newHiddenState
     }
 
-    public mutating func hide() throws {
+    public mutating func hide() async throws {
         guard !isOwnerHidden else { return }
-        try appAxElement.setAttribute(kAXHiddenAttribute, value: true)
+        let appAx = appAxElement
+        try await Self.offMain {
+            try appAx.setAttribute(kAXHiddenAttribute, value: true)
+        }
         isOwnerHidden = true
     }
 
-    public mutating func unhide() throws {
+    public mutating func unhide() async throws {
         guard isOwnerHidden else { return }
-        try appAxElement.setAttribute(kAXHiddenAttribute, value: false)
+        let appAx = appAxElement
+        try await Self.offMain {
+            try appAx.setAttribute(kAXHiddenAttribute, value: false)
+        }
         ownerApplication?.activate()
-        try bringToFront()
+        try await bringToFront()
         isOwnerHidden = false
     }
 
-    public func toggleFullScreen() throws {
-        let isCurrentlyFullscreen = (try? axElement.isFullscreen()) ?? false
-        try axElement.setAttribute("AXFullScreen", value: !isCurrentlyFullscreen)
+    public func toggleFullScreen() async throws {
+        let axEl = axElement
+        try await Self.offMain {
+            let isCurrentlyFullscreen = (try? axEl.isFullscreen()) ?? false
+            try axEl.setAttribute("AXFullScreen", value: !isCurrentlyFullscreen)
+        }
     }
 
-    public func enterFullScreen() throws {
-        try axElement.setAttribute("AXFullScreen", value: true)
+    public func enterFullScreen() async throws {
+        let axEl = axElement
+        try await Self.offMain {
+            try axEl.setAttribute("AXFullScreen", value: true)
+        }
     }
 
-    public func exitFullScreen() throws {
-        try axElement.setAttribute("AXFullScreen", value: false)
+    public func exitFullScreen() async throws {
+        let axEl = axElement
+        try await Self.offMain {
+            try axEl.setAttribute("AXFullScreen", value: false)
+        }
     }
 
     public func close() throws {

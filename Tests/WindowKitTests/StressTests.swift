@@ -266,7 +266,7 @@ final class RepositoryStressTests: XCTestCase {
         await withTaskGroup(of: Void.self) { group in
             for _ in 0..<100 {
                 group.addTask {
-                    _ = repo.purify(forPID: pid, validator: enumerator.isValidElement)
+                    _ = repo.purify(forPID: pid, validator: { enumerator.isValidElement($0) })
                 }
             }
             for i in 50..<150 {
@@ -1169,7 +1169,7 @@ final class CatastrophicStressTests: XCTestCase {
                 for round in 0..<50 {
                     group.addTask {
                         let pid = pids[round % pids.count]
-                        _ = repo.purify(forPID: pid, validator: enumerator.isValidElement)
+                        _ = repo.purify(forPID: pid, validator: { enumerator.isValidElement($0) })
                     }
                 }
 
@@ -1533,5 +1533,95 @@ final class AdversarialChangeReportTests: XCTestCase {
             XCTAssertTrue(addedIDs.isDisjoint(with: report.removed),
                 "A window cannot be both added and removed in the same report")
         }
+    }
+}
+
+// =============================================================================
+// MARK: - Rapid Create/Destroy (Electron Title Change Regression)
+// =============================================================================
+
+final class RapidCreateDestroyTests: XCTestCase {
+
+    /// Phantom create/destroy cycles (Electron title changes) must not trigger SCK rediscovery.
+    func testPhantomCreateDestroyDoesNotRediscover() async {
+        let tracker = WindowTracker()
+        tracker.headless = true
+        AXUIElement.systemWide().setMessagingTimeout(seconds: WindowTracker.axMessagingTimeout)
+
+        let app = NSWorkspace.shared.runningApplications
+            .first(where: { $0.bundleIdentifier == "com.apple.finder" })!
+        let pid = app.processIdentifier
+
+        _ = await tracker.trackApplication(app)
+        let cachedBefore = tracker.repository.readCache(forPID: pid)
+        guard !cachedBefore.isEmpty else { return }
+
+        let snapshotIDs = Set(cachedBefore.map(\.id))
+        let start = CFAbsoluteTimeGetCurrent()
+
+        for _ in 0..<50 {
+            let destroyChanges = tracker.repository.modify(forPID: pid) { windows in
+                windows = windows.filter { WindowEnumerator().isValidElement($0.axElement) }
+            }
+            XCTAssertFalse(destroyChanges.hasChanges,
+                "Destroy filter should be no-op for valid windows")
+
+            let newWindows = await tracker.discovery.discoverNew(for: app)
+            let rediscovered = newWindows.filter { snapshotIDs.contains($0.id) }
+            XCTAssertEqual(rediscovered.count, 0,
+                "discoverNew must not rediscover cached windows")
+        }
+
+        let elapsed = (CFAbsoluteTimeGetCurrent() - start) * 1000
+        XCTAssertLessThan(elapsed, 5000,
+            "50 cycles took \(String(format: "%.0f", elapsed))ms — likely hitting SCK")
+
+        let afterIDs = Set(tracker.repository.readCache(forPID: pid).map(\.id))
+        XCTAssertTrue(snapshotIDs.isSubset(of: afterIDs),
+            "Cached windows must survive phantom cycles")
+    }
+
+    /// discoverNew finds only uncached windows; cached ones are skipped.
+    func testGenuineNewWindowStillDiscovered() async {
+        let tracker = WindowTracker()
+        tracker.headless = true
+        AXUIElement.systemWide().setMessagingTimeout(seconds: WindowTracker.axMessagingTimeout)
+
+        let apps = NSWorkspace.shared.runningApplications
+            .filter { $0.activationPolicy == .regular }
+        guard let app = apps.first else { return }
+        let pid = app.processIdentifier
+
+        _ = await tracker.trackApplication(app)
+        let cachedIDs = Set(tracker.repository.readCache(forPID: pid).map(\.id))
+
+        let allIDs = Set((await tracker.discovery.discoverAll(for: app)).map(\.id))
+        let expectedNewIDs = allIDs.subtracting(cachedIDs)
+
+        let newIDs = Set((await tracker.discovery.discoverNew(for: app)).map(\.id))
+        XCTAssertEqual(newIDs, expectedNewIDs,
+            "discoverNew should find only windows not in cache")
+    }
+
+    func testRapidCreateDestroyDoesNotBlockMainThread() async {
+        let tracker = WindowTracker()
+        tracker.headless = true
+        AXUIElement.systemWide().setMessagingTimeout(seconds: WindowTracker.axMessagingTimeout)
+
+        let app = NSWorkspace.shared.runningApplications
+            .first(where: { $0.bundleIdentifier == "com.apple.finder" })!
+        let pid = app.processIdentifier
+
+        _ = await tracker.trackApplication(app)
+        guard !tracker.repository.readCache(forPID: pid).isEmpty else { return }
+
+        await assertMainThreadResponsive(during: {
+            for _ in 0..<50 {
+                tracker.repository.modify(forPID: pid) { windows in
+                    windows = windows.filter { WindowEnumerator().isValidElement($0.axElement) }
+                }
+                _ = await tracker.discovery.discoverNew(for: app)
+            }
+        }, thresholdMs: 200)
     }
 }

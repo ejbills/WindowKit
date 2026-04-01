@@ -166,7 +166,9 @@ public struct WindowEnumerator {
         return false
     }
 
-    public func isValidElement(_ element: AXUIElement) -> Bool {
+    public func isValidElement(_ element: AXUIElement, isMinimized: Bool = false, isHidden: Bool = false) -> Bool {
+        if isMinimized || isHidden { return true }
+
         do {
             if let _ = try element.position(), let _ = try element.size() {
                 return true
