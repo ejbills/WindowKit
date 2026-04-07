@@ -240,7 +240,8 @@ extension CapturedWindow {
     }
 
     public func close() throws {
-        guard let button = closeButton else {
+        let button = closeButton ?? (try? axElement.closeButton())
+        guard let button else {
             throw WindowManipulationError.closeButtonNotFound
         }
         try button.performAction(kAXPressAction)
