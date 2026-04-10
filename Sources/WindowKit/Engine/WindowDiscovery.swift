@@ -10,9 +10,14 @@ struct WindowDiscovery {
     let enumerator: WindowEnumerator
 
     /// Runs synchronous work on axWorkQueue, guaranteed off main thread.
-    private func onAXQueue<T: Sendable>(_ work: @escaping @Sendable () -> T) async -> T {
+    /// Returns nil if the parent task was cancelled before work began.
+    private func onAXQueue<T: Sendable>(_ work: @escaping @Sendable () -> T) async -> T? {
         await withCheckedContinuation { continuation in
             Self.axWorkQueue.async {
+                guard !Task.isCancelled else {
+                    continuation.resume(returning: nil)
+                    return
+                }
                 continuation.resume(returning: work())
             }
         }
@@ -79,7 +84,7 @@ struct WindowDiscovery {
             guard self.isValidSCKWindow(scWindow) else { return nil }
             return await self.onAXQueue {
                 self.captureFromSCKWindow(scWindow, app: app, freshIDs: freshIDs)
-            }
+            } ?? nil
         }
 
         return results
@@ -201,33 +206,34 @@ struct WindowDiscovery {
         let pid = app.processIdentifier
         let freshIDs = repository.windowIDsWithFreshPreviews(forPID: pid)
 
-        let candidateWindows: [(axWindow: AXUIElement, windowID: CGWindowID, descriptor: CGWindowDescriptor)] = await onAXQueue {
+        typealias AXCandidate = (axWindow: AXUIElement, windowID: CGWindowID, descriptor: CGWindowDescriptor)
+        let candidateWindows: [AXCandidate]? = await onAXQueue({ () -> [AXCandidate] in
             let appElement = AXUIElement.application(pid: pid)
             _ = appElement // used later in capture
-            let axWindows = enumerator.enumerateWindows(forPID: pid)
+            let axWindows = self.enumerator.enumerateWindows(forPID: pid)
             guard !axWindows.isEmpty else { return [] }
 
-            let cgCandidates = enumerator.cgDescriptors(forPID: pid)
+            let cgCandidates = self.enumerator.cgDescriptors(forPID: pid)
             let activeSpaces = activeSpaceIDs()
 
-            var candidates: [(axWindow: AXUIElement, windowID: CGWindowID, descriptor: CGWindowDescriptor)] = []
+            var candidates: [AXCandidate] = []
             var usedIDs = excludeIDs
 
             for axWindow in axWindows {
-                guard enumerator.meetsDiscoveryCriteria(axWindow) else { continue }
+                guard self.enumerator.meetsDiscoveryCriteria(axWindow) else { continue }
 
-                guard let windowID = enumerator.resolveWindowID(axWindow, candidates: cgCandidates, excludedIDs: usedIDs) else {
+                guard let windowID = self.enumerator.resolveWindowID(axWindow, candidates: cgCandidates, excludedIDs: usedIDs) else {
                     continue
                 }
 
                 guard !excludeIDs.contains(windowID) else { continue }
 
                 guard let descriptor = cgCandidates.first(where: { $0.windowID == windowID }),
-                      enumerator.meetsDiscoveryCriteria(windowID: windowID, descriptor: descriptor) else {
+                      self.enumerator.meetsDiscoveryCriteria(windowID: windowID, descriptor: descriptor) else {
                     continue
                 }
 
-                guard enumerator.shouldAcceptWindow(
+                guard self.enumerator.shouldAcceptWindow(
                     element: axWindow,
                     windowID: windowID,
                     descriptor: descriptor,
@@ -243,12 +249,12 @@ struct WindowDiscovery {
                 candidates.append((axWindow, windowID, descriptor))
             }
             return candidates
-        }
+        })
 
-        guard !candidateWindows.isEmpty else { return [] }
+        guard let candidateWindows, !candidateWindows.isEmpty else { return [] }
 
         let appElement = AXUIElement.application(pid: pid)
-        let results = await ConcurrencyHelpers.mapConcurrent(candidateWindows, maxConcurrent: 4, timeout: 10) { candidate in
+        let results = await ConcurrencyHelpers.mapConcurrent(candidateWindows, maxConcurrent: 4, timeout: 10) { candidate -> CapturedWindow? in
             await self.onAXQueue {
                 self.captureAXWindow(
                     candidate.axWindow,
@@ -258,7 +264,7 @@ struct WindowDiscovery {
                     appElement: appElement,
                     freshIDs: freshIDs
                 )
-            }
+            } ?? nil
         }
 
         return results

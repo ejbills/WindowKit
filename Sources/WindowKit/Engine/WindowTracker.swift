@@ -27,6 +27,7 @@ public final class WindowTracker {
     public var frontmostApplication: NSRunningApplication? { processWatcher.frontmostApplication }
 
     private let debouncedTasks = OSAllocatedUnfairLock(initialState: [String: Task<Void, Never>]())
+    private let inFlightTracks = OSAllocatedUnfairLock(initialState: [pid_t: Task<[CapturedWindow], Never>]())
     private let pendingDestroyPIDs = OSAllocatedUnfairLock(initialState: Set<pid_t>())
     private let axQueue = DispatchQueue(label: "com.windowkit.ax", qos: .userInitiated)
     private var notificationCenterWatcher: AccessibilityWatcher?
@@ -140,15 +141,29 @@ public final class WindowTracker {
             return []
         }
 
-        Logger.debug("Tracking application", details: "pid=\(pid), name=\(appName), policy=\(policy.rawValue)")
+        // Cancel any in-flight discovery for this PID
+        inFlightTracks.withLockUnchecked { $0[pid]?.cancel() }
 
-        let discoveredWindows = await discovery.discoverAll(for: app)
+        let task = Task<[CapturedWindow], Never> {
+            Logger.debug("Tracking application", details: "pid=\(pid), name=\(appName), policy=\(policy.rawValue)")
 
-        let changes = repository.store(forPID: pid, windows: Set(discoveredWindows))
-        emitChanges(changes)
+            let discoveredWindows = await discovery.discoverAll(for: app)
+            guard !Task.isCancelled else { return [] }
 
-        Logger.info("Application tracked", details: "pid=\(pid), name=\(appName), windows=\(discoveredWindows.count)")
-        return discoveredWindows
+            let changes = repository.store(forPID: pid, windows: Set(discoveredWindows))
+            emitChanges(changes)
+
+            Logger.info("Application tracked", details: "pid=\(pid), name=\(appName), windows=\(discoveredWindows.count)")
+            return discoveredWindows
+        }
+
+        inFlightTracks.withLockUnchecked { $0[pid] = task }
+        let result = await task.value
+        inFlightTracks.withLockUnchecked { tracks in
+            // Only remove if this is still our task (not replaced by a newer one)
+            if tracks[pid] == task { tracks.removeValue(forKey: pid) }
+        }
+        return result
     }
 
     public func performFullScan() async {
@@ -171,8 +186,28 @@ public final class WindowTracker {
         Logger.info("Full scan complete", details: "duration=\(String(format: "%.1f", elapsed))ms, apps=\(apps.count)")
     }
 
+    /// Returns cached windows immediately — no discovery, no IPC.
+    /// Cache is kept current by AX event handlers and focus-change discovery.
+    public func cachedWindows(for pid: pid_t) -> [CapturedWindow] {
+        Array(repository.readCache(forPID: pid))
+    }
+
+    /// Returns cached windows and refreshes stale previews in the background.
+    /// Use this for hover/preview paths instead of full discovery.
+    public func cachedWindowsRefreshingPreviews(for pid: pid_t) async -> [CapturedWindow] {
+        let windows = repository.readCache(forPID: pid)
+        let freshIDs = repository.windowIDsWithFreshPreviews(forPID: pid)
+        let stale = windows.filter { !freshIDs.contains($0.id) }
+        for window in stale {
+            _ = await capturePreview(for: window.id)
+        }
+        return Array(repository.readCache(forPID: pid))
+    }
+
+    /// Cache-first refresh: returns cached windows and captures stale previews.
+    /// Full discovery only runs on launch, focus change, space change, or wake.
     public func refreshApplication(_ app: NSRunningApplication) async {
-        _ = await trackApplication(app)
+        _ = await cachedWindowsRefreshingPreviews(for: app.processIdentifier)
     }
 
     /// Closes the window and suppresses it from future discovery.
@@ -214,7 +249,7 @@ public final class WindowTracker {
             repository.registerPID(app.processIdentifier)
             watcherManager?.watch(pid: app.processIdentifier)
             debounce(key: "refresh-\(app.processIdentifier)") { [weak self] in
-                await self?.refreshApplication(app)
+                _ = await self?.trackApplication(app)
             }
 
         case .applicationTerminated(let pid):
@@ -225,8 +260,10 @@ public final class WindowTracker {
                 eventSubject.send(.windowDisappeared(window.id))
             }
 
-        case .applicationActivated:
-            break
+        case .applicationActivated(let app):
+            debounce(key: "refresh-\(app.processIdentifier)") { [weak self] in
+                _ = await self?.trackApplication(app)
+            }
 
         case .applicationDeactivated:
             break
