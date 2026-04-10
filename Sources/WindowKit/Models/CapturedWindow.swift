@@ -144,7 +144,11 @@ extension CapturedWindow {
                 app.unhide()
             }
             try await Self.offMain {
-                try axEl.setAttribute(kAXMinimizedAttribute, value: false)
+                if let button = try? axEl.minimizeButton() {
+                    try button.performAction(kAXPressAction)
+                } else {
+                    try axEl.setAttribute(kAXMinimizedAttribute, value: false)
+                }
             }
             ownerApplication?.activate()
             try await bringToFront()
@@ -152,7 +156,11 @@ extension CapturedWindow {
             return false
         } else {
             try await Self.offMain {
-                try axEl.setAttribute(kAXMinimizedAttribute, value: true)
+                if let button = try? axEl.minimizeButton() {
+                    try button.performAction(kAXPressAction)
+                } else {
+                    try axEl.setAttribute(kAXMinimizedAttribute, value: true)
+                }
             }
             isMinimized = true
             return true
@@ -163,7 +171,11 @@ extension CapturedWindow {
         guard !isMinimized else { return }
         let axEl = axElement
         try await Self.offMain {
-            try axEl.setAttribute(kAXMinimizedAttribute, value: true)
+            if let button = try? axEl.minimizeButton() {
+                try button.performAction(kAXPressAction)
+            } else {
+                try axEl.setAttribute(kAXMinimizedAttribute, value: true)
+            }
         }
         isMinimized = true
     }
@@ -175,7 +187,11 @@ extension CapturedWindow {
         }
         let axEl = axElement
         try await Self.offMain {
-            try axEl.setAttribute(kAXMinimizedAttribute, value: false)
+            if let button = try? axEl.minimizeButton() {
+                try button.performAction(kAXPressAction)
+            } else {
+                try axEl.setAttribute(kAXMinimizedAttribute, value: false)
+            }
         }
         ownerApplication?.activate()
         try await bringToFront()
@@ -220,22 +236,34 @@ extension CapturedWindow {
     public func toggleFullScreen() async throws {
         let axEl = axElement
         try await Self.offMain {
-            let isCurrentlyFullscreen = (try? axEl.isFullscreen()) ?? false
-            try axEl.setAttribute("AXFullScreen", value: !isCurrentlyFullscreen)
+            if let button = try? axEl.zoomButton() {
+                try button.performAction(kAXPressAction)
+            } else {
+                let isCurrentlyFullscreen = (try? axEl.isFullscreen()) ?? false
+                try axEl.setAttribute("AXFullScreen", value: !isCurrentlyFullscreen)
+            }
         }
     }
 
     public func enterFullScreen() async throws {
         let axEl = axElement
         try await Self.offMain {
-            try axEl.setAttribute("AXFullScreen", value: true)
+            if let button = try? axEl.zoomButton(), (try? axEl.isFullscreen()) != true {
+                try button.performAction(kAXPressAction)
+            } else {
+                try axEl.setAttribute("AXFullScreen", value: true)
+            }
         }
     }
 
     public func exitFullScreen() async throws {
         let axEl = axElement
         try await Self.offMain {
-            try axEl.setAttribute("AXFullScreen", value: false)
+            if let button = try? axEl.zoomButton(), (try? axEl.isFullscreen()) == true {
+                try button.performAction(kAXPressAction)
+            } else {
+                try axEl.setAttribute("AXFullScreen", value: false)
+            }
         }
     }
 
