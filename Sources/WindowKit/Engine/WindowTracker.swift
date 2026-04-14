@@ -28,7 +28,7 @@ public final class WindowTracker {
 
     private let debouncedTasks = OSAllocatedUnfairLock(initialState: [String: Task<Void, Never>]())
     private let inFlightTracks = OSAllocatedUnfairLock(initialState: [pid_t: Task<[CapturedWindow], Never>]())
-    private let pendingDestroyPIDs = OSAllocatedUnfairLock(initialState: Set<pid_t>())
+    private let destroyBurstState = OSAllocatedUnfairLock(initialState: [pid_t: DestroyBurstState]())
     private let axQueue = DispatchQueue(label: "com.windowkit.ax", qos: .userInitiated)
     private var notificationCenterWatcher: AccessibilityWatcher?
     private var isTracking = false
@@ -40,6 +40,12 @@ public final class WindowTracker {
     private static let wakeInitialDelay: Duration = .seconds(1)
     private static let wakeMaxDelay: Duration = .seconds(15)
     private static let wakeBackoffMultiplier: Double = 2.0
+
+    // Destroy burst tapering — escalating debounce per PID
+    private static let destroyMinInterval: Duration = .milliseconds(50)
+    private static let destroyMaxInterval: Duration = .milliseconds(800)
+    private static let destroyEscalationFactor: Double = 2.0
+    private static let destroyResetThreshold: Duration = .milliseconds(1500)
 
     public init() {
         let repository = WindowRepository()
@@ -120,6 +126,8 @@ public final class WindowTracker {
         for (_, task) in tasks {
             task.cancel()
         }
+
+        destroyBurstState.withLockUnchecked { $0.removeAll() }
     }
 
     @discardableResult
@@ -254,6 +262,7 @@ public final class WindowTracker {
 
         case .applicationTerminated(let pid):
             watcherManager?.unwatch(pid: pid)
+            destroyBurstState.withLockUnchecked { _ = $0.removeValue(forKey: pid) }
             let windows = repository.readCache(forPID: pid)
             repository.removeAll(forPID: pid)
             for window in windows {
@@ -309,51 +318,7 @@ public final class WindowTracker {
             }
 
         case .windowDestroyed:
-            pendingDestroyPIDs.withLockUnchecked { _ = $0.insert(pid) }
-            debounce(key: "window-destroyed") { [weak self] in
-                guard let self else { return }
-                let pids = pendingDestroyPIDs.withLockUnchecked { pids -> Set<pid_t> in
-                    let snapshot = pids
-                    pids.removeAll()
-                    return snapshot
-                }
-                for pid in pids {
-                    guard let app = NSRunningApplication(processIdentifier: pid) else { continue }
-                    Logger.debug("Window destroyed debounced handler", details: "pid=\(pid), policy=\(app.activationPolicy.rawValue), terminated=\(app.isTerminated), hidden=\(app.isHidden)")
-
-                    if app.isHidden {
-                        Logger.debug("Skipping destroy — app is hidden", details: "pid=\(pid)")
-                        continue
-                    }
-
-                    let cached = repository.readCache(forPID: pid)
-                    if !cached.isEmpty, cached.allSatisfy(\.isMinimized) {
-                        Logger.debug("Skipping destroy — all windows minimized", details: "pid=\(pid), count=\(cached.count)")
-                        continue
-                    }
-
-                    if app.isTerminated || app.activationPolicy != .regular {
-                        Logger.debug("App terminated or no longer .regular during destroy, purging all", details: "pid=\(pid)")
-                        let windows = repository.readCache(forPID: pid)
-                        repository.removeAll(forPID: pid)
-                        for window in windows {
-                            eventSubject.send(.windowDisappeared(window.id))
-                        }
-                    } else {
-                        let changes = repository.modify(forPID: pid) { windows in
-                            let before = windows
-                            windows = windows.filter {
-                                self.enumerator.isValidElement($0.axElement, isMinimized: $0.isMinimized, isHidden: $0.isOwnerHidden)
-                            }
-                            let removedCount = before.count - windows.count
-                            if removedCount > 0 {
-                                Logger.debug("Filtered invalid windows", details: "pid=\(pid), removed=\(removedCount)")
-                            }
-                        }
-                        emitChanges(changes)
-                    }
-                }
-            }
+            scheduleDestroyHandler(forPID: pid)
 
         case .windowMinimized(let element):
             let windowID = try? element.windowID()
@@ -561,6 +526,100 @@ public final class WindowTracker {
         }
     }
 
+    // MARK: - Destroy Burst Tapering
+
+    private struct DestroyBurstState {
+        var lastEventTime: ContinuousClock.Instant
+        var currentInterval: Duration
+        var eventCount: Int
+    }
+
+    private func scheduleDestroyHandler(forPID pid: pid_t) {
+        let (interval, eventCount) = destroyBurstState.withLockUnchecked { states -> (Duration, Int) in
+            let now = ContinuousClock.now
+            var state = states[pid] ?? DestroyBurstState(
+                lastEventTime: now, currentInterval: Self.destroyMinInterval, eventCount: 0
+            )
+
+            let elapsed = now - state.lastEventTime
+
+            if elapsed > Self.destroyResetThreshold {
+                // Quiet period — reset to minimum
+                state.currentInterval = Self.destroyMinInterval
+                state.eventCount = 1
+            } else {
+                state.eventCount += 1
+                if state.eventCount > 1 {
+                    let next = state.currentInterval * Self.destroyEscalationFactor
+                    state.currentInterval = min(next, Self.destroyMaxInterval)
+                }
+            }
+
+            state.lastEventTime = now
+            states[pid] = state
+            return (state.currentInterval, state.eventCount)
+        }
+
+        if eventCount > 2 {
+            Logger.debug("Destroy burst tapering", details: "pid=\(pid), interval=\(interval), events=\(eventCount)")
+        }
+
+        debounce(key: "window-destroyed-\(pid)", interval: interval) { [weak self] in
+            guard let self else { return }
+            guard let app = NSRunningApplication(processIdentifier: pid) else { return }
+            Logger.debug("Destroy handler fired", details: "pid=\(pid), policy=\(app.activationPolicy.rawValue), terminated=\(app.isTerminated), hidden=\(app.isHidden)")
+
+            if app.isHidden {
+                Logger.debug("Skipping destroy — app is hidden", details: "pid=\(pid)")
+                return
+            }
+
+            let cached = repository.readCache(forPID: pid)
+            if !cached.isEmpty, cached.allSatisfy(\.isMinimized) {
+                Logger.debug("Skipping destroy — all windows minimized", details: "pid=\(pid), count=\(cached.count)")
+                return
+            }
+
+            if app.isTerminated || app.activationPolicy != .regular {
+                Logger.debug("App terminated or no longer .regular during destroy, purging all", details: "pid=\(pid)")
+                let windows = repository.readCache(forPID: pid)
+                repository.removeAll(forPID: pid)
+                for window in windows {
+                    eventSubject.send(.windowDisappeared(window.id))
+                }
+            } else {
+                let changes = repository.modify(forPID: pid) { windows in
+                    let before = windows
+                    windows = windows.filter {
+                        self.enumerator.isValidElement($0.axElement, isMinimized: $0.isMinimized, isHidden: $0.isOwnerHidden)
+                    }
+                    let removedCount = before.count - windows.count
+                    if removedCount > 0 {
+                        Logger.debug("Filtered invalid windows", details: "pid=\(pid), removed=\(removedCount)")
+                    }
+                }
+                emitChanges(changes)
+            }
+        }
+    }
+
+    private func debounce(key: String, interval: Duration, operation: @escaping () async -> Void) {
+        debouncedTasks.withLockUnchecked { tasks in
+            tasks[key]?.cancel()
+            tasks[key] = Task {
+                do {
+                    try await Task.sleep(for: interval)
+                } catch { return }
+                guard !Task.isCancelled else { return }
+                await withCheckedContinuation { continuation in
+                    axQueue.async { continuation.resume() }
+                }
+                guard !Task.isCancelled else { return }
+                await operation()
+            }
+        }
+    }
+
     // MARK: - System Wake Recovery
 
     private func startWakeObserver() {
@@ -577,6 +636,8 @@ public final class WindowTracker {
                 for (_, task) in tasks { task.cancel() }
                 tasks.removeAll()
             }
+
+            self.destroyBurstState.withLockUnchecked { $0.removeAll() }
 
             self.watcherManager?.resetAll()
             self.notificationCenterWatcher?.reset()

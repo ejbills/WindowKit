@@ -12,7 +12,6 @@ private func assertMainThreadResponsive(
     line: UInt = #line
 ) async {
     let heartbeatInterval: TimeInterval = 0.01 // 10ms heartbeat
-    let maxMissedBeats = Int(thresholdMs / (heartbeatInterval * 1000))
 
     let missedBeats = OSAllocatedUnfairLock(initialState: 0)
     let worstResponseMs = OSAllocatedUnfairLock(initialState: 0.0)

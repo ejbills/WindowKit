@@ -27,6 +27,14 @@ struct WindowDiscovery {
     func discoverNew(for app: NSRunningApplication) async -> [CapturedWindow] {
         let pid = app.processIdentifier
         let cachedIDs = Set(repository.readCache(forPID: pid).map(\.id))
+
+        // Fast-path: CG window list is cheap — skip expensive SCK+AX if no uncached IDs exist
+        let cgIDs = Set(enumerator.cgDescriptors(forPID: pid).map(\.windowID))
+        if !cgIDs.isEmpty, cgIDs.subtracting(cachedIDs).isEmpty {
+            Logger.debug("discoverNew fast-path: no uncached CG IDs", details: "pid=\(pid), cached=\(cachedIDs.count)")
+            return []
+        }
+
         var discoveredWindows: [CapturedWindow] = []
 
         if #available(macOS 12.3, *), SystemPermissions.hasScreenRecording() {
