@@ -370,8 +370,17 @@ public final class WindowKit {
                     delay = min(delay * 2, maxWait - totalWaited)
                 }
 
+                // Rebuild cache before resuming so first poll doesn't report spurious changes
                 await MainActor.run { [weak self] in
-                    self?.startBadgePolling()
+                    guard let self else { return }
+                    let pids = self.trackedApplications.map(\.processIdentifier)
+                    self.badgeQueue.async { [badgeStore = self.badgeStore] in
+                        badgeStore.invalidateCache()
+                        _ = badgeStore.refreshAll(pids: pids)
+                        Task { @MainActor [weak self] in
+                            self?.startBadgePolling()
+                        }
+                    }
                 }
             }
         }
