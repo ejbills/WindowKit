@@ -10,33 +10,34 @@ public final class AppWindowState {
     private let repository: WindowRepository
     private let badgeStore: DockBadgeStore
 
-    private var version: UInt = 0
+    private var windowVersion: UInt = 0
+    private var badgeVersion: UInt = 0
 
     public var windows: [CapturedWindow] {
-        _ = version
+        _ = windowVersion
         return repository.readCache(forPID: pid).sorted {
             $0.lastInteractionTime > $1.lastInteractionTime
         }
     }
 
     public var count: Int {
-        _ = version
+        _ = windowVersion
         return repository.readCache(forPID: pid).count
     }
 
     public var hasWindows: Bool {
-        _ = version
+        _ = windowVersion
         return !repository.readCache(forPID: pid).isEmpty
     }
 
     public var allMinimized: Bool {
-        _ = version
+        _ = windowVersion
         let cached = repository.readCache(forPID: pid)
         return !cached.isEmpty && cached.allSatisfy(\.isMinimized)
     }
 
     public var allHidden: Bool {
-        _ = version
+        _ = windowVersion
         let cached = repository.readCache(forPID: pid)
         return !cached.isEmpty && cached.allSatisfy(\.isOwnerHidden)
     }
@@ -45,24 +46,24 @@ public final class AppWindowState {
     public var isHidden: Bool { allHidden }
 
     public var visibleCount: Int {
-        _ = version
+        _ = windowVersion
         return repository.readCache(forPID: pid).filter {
             !$0.isMinimized && !$0.isOwnerHidden
         }.count
     }
 
     public var badgeLabel: String? {
-        _ = version
+        _ = badgeVersion
         return badgeStore.badge(forPID: pid)
     }
 
     public var hasBadge: Bool {
-        _ = version
+        _ = badgeVersion
         return badgeStore.badge(forPID: pid) != nil
     }
 
     public var badgeCount: Int? {
-        _ = version
+        _ = badgeVersion
         guard let label = badgeStore.badge(forPID: pid) else { return nil }
         return Int(label)
     }
@@ -78,10 +79,14 @@ public final class AppWindowState {
 
     func invalidate() {
         if let animation {
-            withAnimation(animation) { version &+= 1 }
+            withAnimation(animation) { windowVersion &+= 1 }
         } else {
-            version &+= 1
+            windowVersion &+= 1
         }
+    }
+
+    func invalidateBadge() {
+        badgeVersion &+= 1
     }
 }
 
@@ -331,6 +336,7 @@ public final class WindowKit {
     /// Starts a 1-second polling timer for dock badge state.
     public func startBadgePolling() {
         stopBadgePolling()
+        Logger.debug("Badge polling started")
         badgePollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.refreshAllBadges()
@@ -339,10 +345,14 @@ public final class WindowKit {
     }
 
     public func stopBadgePolling() {
+        let wasActive = badgePollTimer != nil
         wakeCooldownWork?.cancel()
         wakeCooldownWork = nil
         badgePollTimer?.invalidate()
         badgePollTimer = nil
+        if wasActive {
+            Logger.debug("Badge polling stopped")
+        }
     }
 
     private func handleWake() {
@@ -420,6 +430,7 @@ public final class WindowKit {
         badgeQueue.async { [badgeStore, weak self] in
             let changed = badgeStore.refresh(forPID: pid)
             if changed {
+                Logger.debug("Badge changed", details: "pid=\(pid)")
                 Task { @MainActor [weak self] in
                     self?.appStates[pid]?.invalidate()
                 }
@@ -428,7 +439,10 @@ public final class WindowKit {
     }
 
     private func refreshAllBadges() {
-        guard !badgeRefreshInFlight else { return }
+        guard !badgeRefreshInFlight else {
+            Logger.debug("Badge poll skipped, refresh in flight")
+            return
+        }
         badgeRefreshInFlight = true
 
         var allPIDs = trackedApplications.map(\.processIdentifier)
@@ -439,6 +453,9 @@ public final class WindowKit {
         let pids = allPIDs
         badgeQueue.async { [badgeStore, weak self] in
             let changed = badgeStore.refreshAll(pids: pids)
+            if !changed.isEmpty {
+                Logger.debug("Badge poll found changes", details: "pids=\(changed)")
+            }
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.badgeRefreshInFlight = false
@@ -454,6 +471,7 @@ public final class WindowKit {
         let trackedPIDs = trackedApplications.map(\.processIdentifier)
         let statePIDs = Array(appStates.keys)
 
+        Logger.debug("Badge full refresh triggered", details: "tracked=\(trackedPIDs.count), states=\(statePIDs.count)")
         badgeQueue.async { [badgeStore, weak self] in
             var allPIDs = Set(trackedPIDs)
             for pid in statePIDs {
