@@ -23,6 +23,7 @@ public struct CapturedWindow: Identifiable, Hashable, @unchecked Sendable {
     public let axElement: AXUIElement
     public let appAxElement: AXUIElement
     public let closeButton: AXUIElement?
+    public let subrole: String?
 
     public var preview: CGImage? { cachedPreview }
     public var ownerApplication: NSRunningApplication? {
@@ -45,7 +46,8 @@ public struct CapturedWindow: Identifiable, Hashable, @unchecked Sendable {
         creationTime: Date,
         axElement: AXUIElement,
         appAxElement: AXUIElement,
-        closeButton: AXUIElement? = nil
+        closeButton: AXUIElement? = nil,
+        subrole: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -63,6 +65,7 @@ public struct CapturedWindow: Identifiable, Hashable, @unchecked Sendable {
         self.axElement = axElement
         self.appAxElement = appAxElement
         self.closeButton = closeButton
+        self.subrole = subrole
         self.cachedPreview = nil
         self.previewTimestamp = nil
     }
@@ -267,12 +270,14 @@ extension CapturedWindow {
         }
     }
 
-    public func close() throws {
+    public func close() async throws {
         let button = closeButton ?? (try? axElement.closeButton())
         guard let button else {
             throw WindowManipulationError.closeButtonNotFound
         }
-        try button.performAction(kAXPressAction)
+        try await Self.offMain {
+            try button.performAction(kAXPressAction)
+        }
     }
 
     public func quit(force: Bool = false) {
@@ -284,23 +289,29 @@ extension CapturedWindow {
         }
     }
 
-    public func setPosition(_ position: CGPoint) throws {
+    public func setPosition(_ position: CGPoint) async throws {
         guard let positionValue = AXValue.from(point: position) else {
             throw WindowManipulationError.invalidValue
         }
-        try axElement.setAttribute(kAXPositionAttribute, value: positionValue)
+        let axEl = axElement
+        try await Self.offMain {
+            try axEl.setAttribute(kAXPositionAttribute, value: positionValue)
+        }
     }
 
-    public func setSize(_ size: CGSize) throws {
+    public func setSize(_ size: CGSize) async throws {
         guard let sizeValue = AXValue.from(size: size) else {
             throw WindowManipulationError.invalidValue
         }
-        try axElement.setAttribute(kAXSizeAttribute, value: sizeValue)
+        let axEl = axElement
+        try await Self.offMain {
+            try axEl.setAttribute(kAXSizeAttribute, value: sizeValue)
+        }
     }
 
-    public func setPositionAndSize(position: CGPoint, size: CGSize) throws {
-        try setPosition(position)
-        try setSize(size)
+    public func setPositionAndSize(position: CGPoint, size: CGSize) async throws {
+        try await setPosition(position)
+        try await setSize(size)
     }
 }
 

@@ -266,8 +266,8 @@ public final class WindowKit {
         tracker.repository.readCache(windowID: id)
     }
 
-    public func closeWindow(_ window: CapturedWindow) throws {
-        try tracker.closeWindow(window)
+    public func closeWindow(_ window: CapturedWindow) async throws {
+        try await tracker.closeWindow(window)
     }
 
     /// Quits the application owning `window`, then polls until the process is

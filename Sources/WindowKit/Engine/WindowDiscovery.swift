@@ -161,7 +161,8 @@ struct WindowDiscovery {
             creationTime: creationTime,
             axElement: axWindow,
             appAxElement: appElement,
-            closeButton: closeButton
+            closeButton: closeButton,
+            subrole: subrole
         )
 
         if freshIDs.contains(scWindow.windowID) {
@@ -292,6 +293,7 @@ struct WindowDiscovery {
         let isHidden = app.isHidden
         let spaceID = windowID.spaces().first
         let closeButton = try? axWindow.closeButton()
+        let subrole = try? axWindow.subrole()
         let existingWindow = repository.readCache(windowID: windowID)
         let creationTime = existingWindow?.creationTime ?? Date()
 
@@ -311,7 +313,8 @@ struct WindowDiscovery {
             creationTime: creationTime,
             axElement: axWindow,
             appAxElement: appElement,
-            closeButton: closeButton
+            closeButton: closeButton,
+            subrole: subrole
         )
 
         if freshIDs.contains(windowID) {

@@ -219,8 +219,8 @@ public final class WindowTracker {
     }
 
     /// Closes the window and suppresses it from future discovery.
-    public func closeWindow(_ window: CapturedWindow) throws {
-        try window.close()
+    public func closeWindow(_ window: CapturedWindow) async throws {
+        try await window.close()
         repository.suppress(windowID: window.id, forPID: window.ownerPID)
         eventSubject.send(.windowDisappeared(window.id))
     }
@@ -331,7 +331,8 @@ public final class WindowTracker {
                         isOwnerHidden: window.isOwnerHidden, isVisible: window.isVisible,
                         owningDisplayID: window.owningDisplayID, desktopSpace: window.desktopSpace,
                         lastInteractionTime: window.lastInteractionTime, creationTime: window.creationTime,
-                        axElement: window.axElement, appAxElement: window.appAxElement
+                        axElement: window.axElement, appAxElement: window.appAxElement,
+                        closeButton: window.closeButton, subrole: window.subrole
                     )
                 }
             }
@@ -347,7 +348,8 @@ public final class WindowTracker {
                         isOwnerHidden: window.isOwnerHidden, isVisible: window.isVisible,
                         owningDisplayID: window.owningDisplayID, desktopSpace: window.desktopSpace,
                         lastInteractionTime: window.lastInteractionTime, creationTime: window.creationTime,
-                        axElement: window.axElement, appAxElement: window.appAxElement
+                        axElement: window.axElement, appAxElement: window.appAxElement,
+                        closeButton: window.closeButton, subrole: window.subrole
                     )
                 }
             }
@@ -372,7 +374,9 @@ public final class WindowTracker {
                             lastInteractionTime: window.lastInteractionTime,
                             creationTime: window.creationTime,
                             axElement: window.axElement,
-                            appAxElement: window.appAxElement
+                            appAxElement: window.appAxElement,
+                            closeButton: window.closeButton,
+                            subrole: window.subrole
                         )
                         updated.cachedPreview = window.cachedPreview
                         updated.previewTimestamp = window.previewTimestamp
@@ -402,7 +406,9 @@ public final class WindowTracker {
                             lastInteractionTime: window.lastInteractionTime,
                             creationTime: window.creationTime,
                             axElement: window.axElement,
-                            appAxElement: window.appAxElement
+                            appAxElement: window.appAxElement,
+                            closeButton: window.closeButton,
+                            subrole: window.subrole
                         )
                         updated.cachedPreview = window.cachedPreview
                         updated.previewTimestamp = window.previewTimestamp
@@ -430,7 +436,8 @@ public final class WindowTracker {
                         isOwnerHidden: window.isOwnerHidden, isVisible: window.isVisible,
                         owningDisplayID: window.owningDisplayID, desktopSpace: window.desktopSpace,
                         lastInteractionTime: window.lastInteractionTime, creationTime: window.creationTime,
-                        axElement: window.axElement, appAxElement: window.appAxElement
+                        axElement: window.axElement, appAxElement: window.appAxElement,
+                        closeButton: window.closeButton, subrole: window.subrole
                     )
                 }
             }
@@ -453,7 +460,8 @@ public final class WindowTracker {
                         owningDisplayID: WindowDiscovery.displayID(for: newBounds) ?? window.owningDisplayID,
                         desktopSpace: window.desktopSpace, lastInteractionTime: Date(),
                         creationTime: window.creationTime,
-                        axElement: window.axElement, appAxElement: window.appAxElement
+                        axElement: window.axElement, appAxElement: window.appAxElement,
+                        closeButton: window.closeButton, subrole: window.subrole
                     )
                 }
             }
@@ -497,7 +505,8 @@ public final class WindowTracker {
                     isOwnerHidden: existing.isOwnerHidden, isVisible: existing.isVisible,
                     owningDisplayID: existing.owningDisplayID, desktopSpace: existing.desktopSpace,
                     lastInteractionTime: Date(), creationTime: existing.creationTime,
-                    axElement: existing.axElement, appAxElement: existing.appAxElement
+                    axElement: existing.axElement, appAxElement: existing.appAxElement,
+                    closeButton: existing.closeButton, subrole: existing.subrole
                 )
                 updated.cachedPreview = existing.cachedPreview
                 updated.previewTimestamp = existing.previewTimestamp
