@@ -167,7 +167,8 @@ public final class WindowKit {
                     self.launchingApplications.append(app)
                     self.scheduleLaunchTimeout(for: app.processIdentifier)
 
-                case .applicationLaunched:
+                case .applicationLaunched(let app):
+                    self.tracker.repository.registerPID(app.processIdentifier)
                     self.trackedApplications = self.tracker.repository.trackedApplications()
                     self.badgeStore.invalidateCache()
 
