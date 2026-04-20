@@ -27,6 +27,7 @@ public final class WindowTracker {
     public var frontmostApplication: NSRunningApplication? { processWatcher.frontmostApplication }
 
     private let debouncedTasks = OSAllocatedUnfairLock(initialState: [String: Task<Void, Never>]())
+    private let pendingOperations = OSAllocatedUnfairLock(initialState: [String: [() async -> Void]]())
     private let inFlightTracks = OSAllocatedUnfairLock(initialState: [pid_t: Task<[CapturedWindow], Never>]())
     private let destroyBurstState = OSAllocatedUnfairLock(initialState: [pid_t: DestroyBurstState]())
     private let axQueue = DispatchQueue(label: "com.windowkit.ax", qos: .userInitiated)
@@ -127,6 +128,7 @@ public final class WindowTracker {
             task.cancel()
         }
 
+        pendingOperations.withLockUnchecked { $0.removeAll() }
         destroyBurstState.withLockUnchecked { $0.removeAll() }
     }
 
@@ -515,26 +517,6 @@ public final class WindowTracker {
         }
     }
 
-    private func debounce(key: String, operation: @escaping () async -> Void) {
-        debouncedTasks.withLockUnchecked { tasks in
-            tasks[key]?.cancel()
-            tasks[key] = Task {
-                do {
-                    try await Task.sleep(nanoseconds: UInt64(Self.eventDebounceInterval * 1_000_000_000))
-                } catch {
-                    return
-                }
-                guard !Task.isCancelled else { return }
-                // Hop off main thread before running AX work
-                await withCheckedContinuation { continuation in
-                    axQueue.async { continuation.resume() }
-                }
-                guard !Task.isCancelled else { return }
-                await operation()
-            }
-        }
-    }
-
     // MARK: - Destroy Burst Tapering
 
     private struct DestroyBurstState {
@@ -612,19 +594,23 @@ public final class WindowTracker {
         }
     }
 
-    private func debounce(key: String, interval: Duration, operation: @escaping () async -> Void) {
+    private func debounce(key: String, interval: Duration = .milliseconds(Int(eventDebounceInterval * 1000)), operation: @escaping () async -> Void) {
+        pendingOperations.withLockUnchecked { $0[key, default: []].append(operation) }
         debouncedTasks.withLockUnchecked { tasks in
             tasks[key]?.cancel()
-            tasks[key] = Task {
+            tasks[key] = Task { [pendingOperations] in
                 do {
                     try await Task.sleep(for: interval)
                 } catch { return }
                 guard !Task.isCancelled else { return }
                 await withCheckedContinuation { continuation in
-                    axQueue.async { continuation.resume() }
+                    self.axQueue.async { continuation.resume() }
                 }
                 guard !Task.isCancelled else { return }
-                await operation()
+                let ops = pendingOperations.withLockUnchecked { $0.removeValue(forKey: key) ?? [] }
+                for op in ops {
+                    await op()
+                }
             }
         }
     }
@@ -646,6 +632,7 @@ public final class WindowTracker {
                 tasks.removeAll()
             }
 
+            self.pendingOperations.withLockUnchecked { $0.removeAll() }
             self.destroyBurstState.withLockUnchecked { $0.removeAll() }
 
             self.watcherManager?.resetAll()
