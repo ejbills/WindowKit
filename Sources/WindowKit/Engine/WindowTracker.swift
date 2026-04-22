@@ -497,6 +497,7 @@ public final class WindowTracker {
 
     private func updateWindowTimestamp(windowID: CGWindowID?, pid: pid_t) {
         guard let windowID else { return }
+        var focused: CapturedWindow?
         repository.modify(forPID: pid) { windows in
             if let existing = windows.first(where: { $0.id == windowID }) {
                 windows.remove(existing)
@@ -513,7 +514,11 @@ public final class WindowTracker {
                 updated.cachedPreview = existing.cachedPreview
                 updated.previewTimestamp = existing.previewTimestamp
                 windows.insert(updated)
+                focused = updated
             }
+        }
+        if let focused {
+            eventSubject.send(.windowChanged(focused))
         }
     }
 
