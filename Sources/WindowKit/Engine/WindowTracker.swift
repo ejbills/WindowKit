@@ -163,7 +163,14 @@ public final class WindowTracker {
             let changes = repository.store(forPID: pid, windows: Set(discoveredWindows))
             emitChanges(changes)
 
-            Logger.info("Application tracked", details: "pid=\(pid), name=\(appName), windows=\(discoveredWindows.count)")
+            let beforeIDs = Set(repository.readCache(forPID: pid).map(\.id))
+            repository.purify(forPID: pid, validator: { enumerator.isValidElement($0) })
+            let afterIDs = Set(repository.readCache(forPID: pid).map(\.id))
+            for staleID in beforeIDs.subtracting(afterIDs) {
+                eventSubject.send(.windowDisappeared(staleID))
+            }
+
+            Logger.info("Application tracked", details: "pid=\(pid), name=\(appName), windows=\(afterIDs.count)")
             return discoveredWindows
         }
 
