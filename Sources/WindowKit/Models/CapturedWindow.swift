@@ -143,9 +143,6 @@ extension CapturedWindow {
     public mutating func toggleMinimize() async throws -> Bool {
         let axEl = axElement
         if isMinimized {
-            if let app = ownerApplication, app.isHidden {
-                app.unhide()
-            }
             try await Self.offMain {
                 if let button = try? axEl.minimizeButton() {
                     try button.performAction(kAXPressAction)
@@ -153,7 +150,6 @@ extension CapturedWindow {
                     try axEl.setAttribute(kAXMinimizedAttribute, value: false)
                 }
             }
-            ownerApplication?.activate()
             try await bringToFront()
             isMinimized = false
             return false
@@ -185,9 +181,6 @@ extension CapturedWindow {
 
     public mutating func restore() async throws {
         guard isMinimized else { return }
-        if let app = ownerApplication, app.isHidden {
-            app.unhide()
-        }
         let axEl = axElement
         try await Self.offMain {
             if let button = try? axEl.minimizeButton() {
@@ -196,7 +189,6 @@ extension CapturedWindow {
                 try axEl.setAttribute(kAXMinimizedAttribute, value: false)
             }
         }
-        ownerApplication?.activate()
         try await bringToFront()
         isMinimized = false
     }
@@ -209,7 +201,6 @@ extension CapturedWindow {
             try appAx.setAttribute(kAXHiddenAttribute, value: newHiddenState)
         }
         if !newHiddenState {
-            ownerApplication?.activate()
             try await bringToFront()
         }
         isOwnerHidden = newHiddenState
@@ -231,7 +222,6 @@ extension CapturedWindow {
         try await Self.offMain {
             try appAx.setAttribute(kAXHiddenAttribute, value: false)
         }
-        ownerApplication?.activate()
         try await bringToFront()
         isOwnerHidden = false
     }
