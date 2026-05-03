@@ -152,6 +152,8 @@ public final class WindowTracker {
         }
 
         // Cancel any in-flight discovery for this PID
+        repository.registerPID(pid)
+        ensureWatching(pid: pid, reason: "trackApplication")
         inFlightTracks.withLockUnchecked { $0[pid]?.cancel() }
 
         let task = Task<[CapturedWindow], Never> {
@@ -264,7 +266,7 @@ public final class WindowTracker {
 
         case .applicationLaunched(let app):
             repository.registerPID(app.processIdentifier)
-            watcherManager?.watch(pid: app.processIdentifier)
+            ensureWatching(pid: app.processIdentifier, reason: "applicationLaunched")
             debounce(key: "refresh-\(app.processIdentifier)") { [weak self] in
                 _ = await self?.trackApplication(app)
             }
@@ -279,6 +281,8 @@ public final class WindowTracker {
             }
 
         case .applicationActivated(let app):
+            repository.registerPID(app.processIdentifier)
+            ensureWatching(pid: app.processIdentifier, reason: "applicationActivated")
             debounce(key: "refresh-\(app.processIdentifier)") { [weak self] in
                 _ = await self?.trackApplication(app)
             }
@@ -298,6 +302,17 @@ public final class WindowTracker {
             return true
         }
         return false
+    }
+
+    private func ensureWatching(pid: pid_t, reason: String) {
+        guard let watcherManager else { return }
+        if watcherManager.isWatching(pid: pid) {
+            return
+        }
+
+        if !watcherManager.watch(pid: pid) {
+            Logger.debug("AX watcher setup deferred", details: "pid=\(pid), reason=\(reason)")
+        }
     }
 
     private func handleAccessibilityEvent(_ event: AccessibilityEvent, forPID pid: pid_t) {

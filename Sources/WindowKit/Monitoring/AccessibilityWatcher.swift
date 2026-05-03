@@ -103,13 +103,31 @@ public final class AccessibilityWatcher {
         self.observer = observer
 
         let userData = Unmanaged.passUnretained(self).toOpaque()
+        var registeredNotifications = [String]()
         for notification in Self.notificationNames {
-            AXObserverAddNotification(
+            let result = AXObserverAddNotification(
                 observer,
                 appElement,
                 notification as CFString,
                 userData
             )
+
+            if result == .success || result == .notificationAlreadyRegistered {
+                registeredNotifications.append(notification)
+            }
+        }
+
+        let requiredNotifications = [
+            kAXWindowCreatedNotification,
+            kAXUIElementDestroyedNotification,
+        ]
+        let missingRequired = requiredNotifications.filter { !registeredNotifications.contains($0) }
+        guard missingRequired.isEmpty else {
+            for notification in registeredNotifications {
+                AXObserverRemoveNotification(observer, appElement, notification as CFString)
+            }
+            self.observer = nil
+            return false
         }
 
         CFRunLoopAddSource(
