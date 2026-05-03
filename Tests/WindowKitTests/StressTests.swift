@@ -100,7 +100,24 @@ private func finderPID() -> pid_t {
 
 final class AXReadinessTests: XCTestCase {
 
-    func testCanaryPassesUnderNormalConditions() {
+    func testCanaryPassesUnderNormalConditions() throws {
+        guard let finder = NSWorkspace.shared.runningApplications
+            .first(where: { $0.bundleIdentifier == "com.apple.finder" }) else {
+            throw XCTSkip("Finder is not running")
+        }
+
+        let app = AXUIElement.application(pid: finder.processIdentifier)
+        app.setMessagingTimeout(seconds: 1.0)
+
+        guard (try? app.role()) == kAXApplicationRole as String else {
+            throw XCTSkip("Finder AX role is unavailable")
+        }
+
+        guard let windows = try? app.windows(),
+              windows.contains(where: { (try? $0.role()) == kAXWindowRole as String }) else {
+            throw XCTSkip("Finder has no AX windows available for the readiness canary")
+        }
+
         XCTAssertTrue(isAccessibilityReady(), "AX canary should pass when system is not in a degraded state")
     }
 

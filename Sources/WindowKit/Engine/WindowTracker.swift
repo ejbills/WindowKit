@@ -221,9 +221,9 @@ public final class WindowTracker {
         return Array(repository.readCache(forPID: pid))
     }
 
-    /// Cache-first refresh: returns cached windows and captures stale previews.
-    /// Full discovery only runs on launch, focus change, space change, or wake.
+    /// Explicit refresh: rediscover and validate windows, then capture stale previews.
     public func refreshApplication(_ app: NSRunningApplication) async {
+        _ = await trackApplication(app)
         _ = await cachedWindowsRefreshingPreviews(for: app.processIdentifier)
     }
 
