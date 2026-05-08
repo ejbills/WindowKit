@@ -9,6 +9,8 @@ struct WindowDiscovery {
     var screenshotService: ScreenshotService
     let enumerator: WindowEnumerator
 
+    private typealias AXCandidate = (axWindow: AXUIElement, windowID: CGWindowID, descriptor: CGWindowDescriptor)
+
     /// Runs synchronous work on axWorkQueue, guaranteed off main thread.
     /// Returns nil if the parent task was cancelled before work began.
     private func onAXQueue<T: Sendable>(_ work: @escaping @Sendable () -> T) async -> T? {
@@ -28,28 +30,25 @@ struct WindowDiscovery {
         let pid = app.processIdentifier
         let cachedIDs = Set(repository.readCache(forPID: pid).map(\.id))
 
-        // Fast-path: CG window list is cheap — skip expensive SCK+AX if no uncached IDs exist
-        let cgIDs = Set(enumerator.cgDescriptors(forPID: pid).map(\.windowID))
-        if !cgIDs.isEmpty, cgIDs.subtracting(cachedIDs).isEmpty {
-            Logger.debug("discoverNew fast-path: no uncached CG IDs", details: "pid=\(pid), cached=\(cachedIDs.count)")
+        let eligibleCGIDs = Set(enumerator.cgDescriptors(forPID: pid).compactMap { descriptor -> CGWindowID? in
+            enumerator.meetsDiscoveryCriteria(windowID: descriptor.windowID, descriptor: descriptor)
+                ? descriptor.windowID
+                : nil
+        })
+        if !eligibleCGIDs.isEmpty, eligibleCGIDs.subtracting(cachedIDs).isEmpty {
+            Logger.debug("discoverNew fast-path: no uncached eligible CG IDs", details: "pid=\(pid), cached=\(cachedIDs.count)")
             return []
         }
 
-        var discoveredWindows: [CapturedWindow] = []
-
-        if #available(macOS 12.3, *), SystemPermissions.hasScreenRecording() {
-            if let sckWindows = await discoverViaSCK(for: app, skipIDs: cachedIDs) {
-                Logger.debug("SCK new-window discovery complete", details: "pid=\(pid), found=\(sckWindows.count)")
-                discoveredWindows.append(contentsOf: sckWindows)
-            }
+        let candidates = await accessibilityCandidates(for: app, excludeIDs: cachedIDs)
+        guard !candidates.isEmpty else {
+            Logger.debug("discoverNew fast-path: no uncached AX windows", details: "pid=\(pid), cached=\(cachedIDs.count)")
+            return []
         }
 
-        let sckWindowIDs = Set(discoveredWindows.map(\.id))
-        let axWindows = await discoverViaAccessibility(for: app, excludeIDs: cachedIDs.union(sckWindowIDs))
+        let axWindows = await captureAXCandidates(candidates, app: app)
         Logger.debug("AX new-window discovery complete", details: "pid=\(pid), found=\(axWindows.count)")
-        discoveredWindows.append(contentsOf: axWindows)
-
-        return discoveredWindows
+        return axWindows
     }
 
     func discoverAll(for app: NSRunningApplication) async -> [CapturedWindow] {
@@ -212,10 +211,13 @@ struct WindowDiscovery {
     }
 
     func discoverViaAccessibility(for app: NSRunningApplication, excludeIDs: Set<CGWindowID>) async -> [CapturedWindow] {
-        let pid = app.processIdentifier
-        let freshIDs = repository.windowIDsWithFreshPreviews(forPID: pid)
+        let candidates = await accessibilityCandidates(for: app, excludeIDs: excludeIDs)
+        return await captureAXCandidates(candidates, app: app)
+    }
 
-        typealias AXCandidate = (axWindow: AXUIElement, windowID: CGWindowID, descriptor: CGWindowDescriptor)
+    private func accessibilityCandidates(for app: NSRunningApplication, excludeIDs: Set<CGWindowID>) async -> [AXCandidate] {
+        let pid = app.processIdentifier
+
         let candidateWindows: [AXCandidate]? = await onAXQueue({ () -> [AXCandidate] in
             let appElement = AXUIElement.application(pid: pid)
             _ = appElement // used later in capture
@@ -260,8 +262,14 @@ struct WindowDiscovery {
             return candidates
         })
 
-        guard let candidateWindows, !candidateWindows.isEmpty else { return [] }
+        return candidateWindows ?? []
+    }
 
+    private func captureAXCandidates(_ candidateWindows: [AXCandidate], app: NSRunningApplication) async -> [CapturedWindow] {
+        guard !candidateWindows.isEmpty else { return [] }
+
+        let pid = app.processIdentifier
+        let freshIDs = repository.windowIDsWithFreshPreviews(forPID: pid)
         let appElement = AXUIElement.application(pid: pid)
         let results = await ConcurrencyHelpers.mapConcurrent(candidateWindows, maxConcurrent: 4, timeout: 10) { candidate -> CapturedWindow? in
             await self.onAXQueue {
