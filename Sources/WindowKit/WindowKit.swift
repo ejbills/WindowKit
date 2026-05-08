@@ -267,6 +267,38 @@ public final class WindowKit {
         tracker.repository.readCache(windowID: id)
     }
 
+    public func managedDisplays() throws -> [ManagedDisplay] {
+        try WindowSpaces.managedDisplays()
+    }
+
+    public func currentManagedSpaceID() throws -> CGSSpaceID {
+        try WindowSpaces.currentManagedSpaceID()
+    }
+
+    public func managedSpaces(for window: CapturedWindow) -> [CGSSpaceID] {
+        managedSpaces(forWindowID: window.id)
+    }
+
+    public func managedSpaces(forWindowID id: CGWindowID) -> [CGSSpaceID] {
+        WindowSpaces.spaces(forWindowID: id)
+    }
+
+    public func moveWindow(_ window: CapturedWindow, toManagedSpace spaceID: CGSSpaceID) throws {
+        try moveWindow(withID: window.id, ownerPID: window.ownerPID, toManagedSpace: spaceID)
+    }
+
+    public func moveWindow(withID id: CGWindowID, toManagedSpace spaceID: CGSSpaceID) throws {
+        try moveWindow(withID: id, ownerPID: nil, toManagedSpace: spaceID)
+    }
+
+    public func moveWindowToCurrentManagedSpace(_ window: CapturedWindow) throws {
+        try moveWindow(window, toManagedSpace: currentManagedSpaceID())
+    }
+
+    public func moveWindowToCurrentManagedSpace(withID id: CGWindowID) throws {
+        try moveWindow(withID: id, toManagedSpace: currentManagedSpaceID())
+    }
+
     public func closeWindow(_ window: CapturedWindow) async throws {
         try await tracker.closeWindow(window)
     }
@@ -415,6 +447,15 @@ public final class WindowKit {
     private func invalidateAppState(forPID pid: pid_t) {
         refreshBadge(forPID: pid)
         appStates[pid]?.invalidate()
+    }
+
+    private func moveWindow(withID id: CGWindowID, ownerPID: pid_t?, toManagedSpace spaceID: CGSSpaceID) throws {
+        try WindowSpaces.move(windowID: id, toManagedSpace: spaceID)
+        if let ownerPID {
+            invalidateAppState(forPID: ownerPID)
+        } else {
+            invalidateAppState(forWindowID: id)
+        }
     }
 
     private func invalidateAppState(forWindowID id: CGWindowID) {

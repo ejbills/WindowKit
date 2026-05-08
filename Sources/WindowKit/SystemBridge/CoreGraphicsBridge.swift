@@ -106,6 +106,10 @@ private typealias SLSSpaceAddWindowsAndRemoveFromSpacesType = @convention(c) (
     CGSConnectionID, CGSSpaceID, CFArray, Int32
 ) -> Void
 
+private typealias SLSCopyManagedDisplaySpacesType = @convention(c) (
+    CGSConnectionID
+) -> CFArray?
+
 enum SLSSpaceAbsoluteLevel: Int32 {
     case `default` = 0
     case setupAssistant = 100
@@ -123,6 +127,7 @@ private var spaceCreatePtr: SLSSpaceCreateType?
 private var spaceSetAbsoluteLevelPtr: SLSSpaceSetAbsoluteLevelType?
 private var showSpacesPtr: SLSShowSpacesType?
 private var spaceAddWindowsPtr: SLSSpaceAddWindowsAndRemoveFromSpacesType?
+private var copyManagedDisplaySpacesPtr: SLSCopyManagedDisplaySpacesType?
 
 private func loadSkyLightFunctions() {
     guard skyLightHandle == nil else { return }
@@ -156,6 +161,10 @@ private func loadSkyLightFunctions() {
 
     if let symbol = dlsym(handle, "SLSSpaceAddWindowsAndRemoveFromSpaces") {
         spaceAddWindowsPtr = unsafeBitCast(symbol, to: SLSSpaceAddWindowsAndRemoveFromSpacesType.self)
+    }
+
+    if let symbol = dlsym(handle, "SLSCopyManagedDisplaySpaces") {
+        copyManagedDisplaySpacesPtr = unsafeBitCast(symbol, to: SLSCopyManagedDisplaySpacesType.self)
     }
 }
 
@@ -322,6 +331,11 @@ func slsSpaceAddWindows(
     loadSkyLightFunctions()
     let cfArray = windowIDs.map { NSNumber(value: $0) } as CFArray
     spaceAddWindowsPtr?(connection, spaceID, cfArray, 7)
+}
+
+func slsCopyManagedDisplaySpaces(_ connection: CGSConnectionID) -> CFArray? {
+    loadSkyLightFunctions()
+    return copyManagedDisplaySpacesPtr?(connection)
 }
 
 public func activeSpaceIDs() -> Set<Int> {
