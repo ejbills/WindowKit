@@ -53,6 +53,44 @@ final class WindowKitTests: XCTestCase {
         XCTAssertEqual(repo.previewCacheDuration, 60.0)
     }
 
+    func testWindowFillAreaFrames() {
+        let screen = CGRect(x: 100, y: 50, width: 1200, height: 800)
+
+        XCTAssertEqual(WindowFillArea.full.frame(in: screen), screen)
+        XCTAssertEqual(
+            WindowFillArea.leftHalf.frame(in: screen),
+            CGRect(x: 100, y: 50, width: 600, height: 800)
+        )
+        XCTAssertEqual(
+            WindowFillArea.rightHalf.frame(in: screen),
+            CGRect(x: 700, y: 50, width: 600, height: 800)
+        )
+        XCTAssertEqual(
+            WindowFillArea.topHalf.frame(in: screen),
+            CGRect(x: 100, y: 50, width: 1200, height: 400)
+        )
+        XCTAssertEqual(
+            WindowFillArea.bottomHalf.frame(in: screen),
+            CGRect(x: 100, y: 450, width: 1200, height: 400)
+        )
+        XCTAssertEqual(
+            WindowFillArea.topLeftQuarter.frame(in: screen),
+            CGRect(x: 100, y: 50, width: 600, height: 400)
+        )
+        XCTAssertEqual(
+            WindowFillArea.topRightQuarter.frame(in: screen),
+            CGRect(x: 700, y: 50, width: 600, height: 400)
+        )
+        XCTAssertEqual(
+            WindowFillArea.bottomLeftQuarter.frame(in: screen),
+            CGRect(x: 100, y: 450, width: 600, height: 400)
+        )
+        XCTAssertEqual(
+            WindowFillArea.bottomRightQuarter.frame(in: screen),
+            CGRect(x: 700, y: 450, width: 600, height: 400)
+        )
+    }
+
     func testRepositoryMergeStrategy() {
         // Test that store() merges windows instead of replacing them
         // This ensures windows on other spaces (not re-discovered due to CGS timing)

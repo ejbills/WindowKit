@@ -309,6 +309,7 @@ public enum WindowManipulationError: Error, LocalizedError {
     case applicationNotFound
     case closeButtonNotFound
     case invalidValue
+    case screenNotFound
 
     public var errorDescription: String? {
         switch self {
@@ -318,6 +319,8 @@ public enum WindowManipulationError: Error, LocalizedError {
             return "The window's close button could not be found"
         case .invalidValue:
             return "Could not create AXValue for the given value"
+        case .screenNotFound:
+            return "Could not resolve a target screen for the window"
         }
     }
 }

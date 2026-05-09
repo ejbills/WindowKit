@@ -251,10 +251,19 @@ window.quit(force: true)        // force kill
 // Positioning
 try window.setPosition(CGPoint(x: 100, y: 100))
 try window.setSize(CGSize(width: 800, height: 600))
+try window.setFrame(CGRect(x: 100, y: 100, width: 800, height: 600))
 try window.setPositionAndSize(
     position: CGPoint(x: 100, y: 100),
     size: CGSize(width: 800, height: 600)
 )
+
+// Screen filling and tiling
+try window.maximize()                 // visible frame of the window's screen
+try window.fillLeftHalf()
+try window.fillRightHalf()
+try window.fillTopHalf()
+try window.fillBottomHalf()
+try window.fill(.topLeftQuarter)
 ```
 
 ### Badge Polling
