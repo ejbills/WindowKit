@@ -67,27 +67,27 @@ final class WindowKitTests: XCTestCase {
         )
         XCTAssertEqual(
             WindowFillArea.topHalf.frame(in: screen),
-            CGRect(x: 100, y: 50, width: 1200, height: 400)
-        )
-        XCTAssertEqual(
-            WindowFillArea.bottomHalf.frame(in: screen),
             CGRect(x: 100, y: 450, width: 1200, height: 400)
         )
         XCTAssertEqual(
+            WindowFillArea.bottomHalf.frame(in: screen),
+            CGRect(x: 100, y: 50, width: 1200, height: 400)
+        )
+        XCTAssertEqual(
             WindowFillArea.topLeftQuarter.frame(in: screen),
-            CGRect(x: 100, y: 50, width: 600, height: 400)
-        )
-        XCTAssertEqual(
-            WindowFillArea.topRightQuarter.frame(in: screen),
-            CGRect(x: 700, y: 50, width: 600, height: 400)
-        )
-        XCTAssertEqual(
-            WindowFillArea.bottomLeftQuarter.frame(in: screen),
             CGRect(x: 100, y: 450, width: 600, height: 400)
         )
         XCTAssertEqual(
-            WindowFillArea.bottomRightQuarter.frame(in: screen),
+            WindowFillArea.topRightQuarter.frame(in: screen),
             CGRect(x: 700, y: 450, width: 600, height: 400)
+        )
+        XCTAssertEqual(
+            WindowFillArea.bottomLeftQuarter.frame(in: screen),
+            CGRect(x: 100, y: 50, width: 600, height: 400)
+        )
+        XCTAssertEqual(
+            WindowFillArea.bottomRightQuarter.frame(in: screen),
+            CGRect(x: 700, y: 50, width: 600, height: 400)
         )
     }
 

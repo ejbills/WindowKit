@@ -23,17 +23,17 @@ public enum WindowFillArea: Sendable {
         case .rightHalf:
             return CGRect(x: bounds.midX, y: bounds.minY, width: halfWidth, height: bounds.height)
         case .topHalf:
-            return CGRect(x: bounds.minX, y: bounds.minY, width: bounds.width, height: halfHeight)
-        case .bottomHalf:
             return CGRect(x: bounds.minX, y: bounds.midY, width: bounds.width, height: halfHeight)
+        case .bottomHalf:
+            return CGRect(x: bounds.minX, y: bounds.minY, width: bounds.width, height: halfHeight)
         case .topLeftQuarter:
-            return CGRect(x: bounds.minX, y: bounds.minY, width: halfWidth, height: halfHeight)
-        case .topRightQuarter:
-            return CGRect(x: bounds.midX, y: bounds.minY, width: halfWidth, height: halfHeight)
-        case .bottomLeftQuarter:
             return CGRect(x: bounds.minX, y: bounds.midY, width: halfWidth, height: halfHeight)
-        case .bottomRightQuarter:
+        case .topRightQuarter:
             return CGRect(x: bounds.midX, y: bounds.midY, width: halfWidth, height: halfHeight)
+        case .bottomLeftQuarter:
+            return CGRect(x: bounds.minX, y: bounds.minY, width: halfWidth, height: halfHeight)
+        case .bottomRightQuarter:
+            return CGRect(x: bounds.midX, y: bounds.minY, width: halfWidth, height: halfHeight)
         }
     }
 }

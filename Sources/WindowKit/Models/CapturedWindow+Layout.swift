@@ -1,15 +1,26 @@
 import Cocoa
 
 extension CapturedWindow {
+    /// Sets the window frame in AppKit screen coordinates.
     public func setFrame(_ frame: CGRect) async throws {
-        try await setPositionAndSize(position: frame.origin, size: frame.size)
+        let screen = WindowLayoutScreenResolver.screen(containing: frame) ??
+            (try? WindowLayoutScreenResolver.currentScreen(for: axElement)) ??
+            NSScreen.main
+
+        guard let screen else {
+            throw WindowManipulationError.screenNotFound
+        }
+
+        try await applyWindowFrame(frame, on: screen)
     }
 
     /// Resizes and positions the window inside the visible frame of `screen`.
-    /// If no screen is supplied, WindowKit uses the window's owning display when
-    /// available, then the screen containing the largest part of the window.
+    /// If no screen is supplied, WindowKit uses the screen containing the current
+    /// AX window frame.
     public func fill(_ area: WindowFillArea, on screen: NSScreen? = nil) async throws {
-        try await setFrame(targetFrame(for: area, on: screen))
+        let targetScreen = try screen ?? WindowLayoutScreenResolver.currentScreen(for: axElement)
+        let targetFrame = area.frame(in: targetScreen.visibleFrame)
+        try await applyWindowFrame(targetFrame, on: targetScreen)
     }
 
     public func maximize(on screen: NSScreen? = nil) async throws {
@@ -48,61 +59,57 @@ extension CapturedWindow {
         try await fill(.bottomRightQuarter, on: screen)
     }
 
-    private func targetFrame(for area: WindowFillArea, on screen: NSScreen?) throws -> CGRect {
-        guard let targetScreen = WindowLayoutScreenResolver.screen(for: self, preferred: screen) else {
-            throw WindowManipulationError.screenNotFound
+    private func applyWindowFrame(_ targetFrame: CGRect, on screen: NSScreen) async throws {
+        let primaryScreenMaxY = NSScreen.screens.first?.frame.maxY ?? screen.frame.maxY
+        let position = CGPoint(x: targetFrame.minX, y: primaryScreenMaxY - targetFrame.maxY)
+        let size = targetFrame.size
+        guard let positionValue = AXValue.from(point: position),
+              let sizeValue = AXValue.from(size: size) else {
+            throw WindowManipulationError.invalidValue
         }
 
-        return area.frame(in: WindowLayoutScreenResolver.accessibilityVisibleFrame(for: targetScreen))
+        let axEl = axElement
+        try await Self.offMain {
+            try axEl.setAttribute(kAXPositionAttribute, value: positionValue)
+            try axEl.setAttribute(kAXSizeAttribute, value: sizeValue)
+        }
     }
 }
 
 private enum WindowLayoutScreenResolver {
-    static func screen(for window: CapturedWindow, preferred screen: NSScreen?) -> NSScreen? {
-        if let screen { return screen }
-
-        if let owningDisplayID = window.owningDisplayID,
-           let displayScreen = NSScreen.screens.first(where: { $0.directDisplayID == owningDisplayID }) {
-            return displayScreen
+    static func currentScreen(for element: AXUIElement) throws -> NSScreen {
+        guard let windowFrame = currentWindowFrame(for: element) else {
+            throw WindowManipulationError.screenNotFound
         }
 
-        if let intersectingScreen = screenContainingMost(of: window.bounds) {
-            return intersectingScreen
+        guard let screen = screen(containing: windowFrame) ?? NSScreen.main else {
+            throw WindowManipulationError.screenNotFound
         }
 
-        return NSScreen.main ?? NSScreen.screens.first
+        return screen
     }
 
-    static func accessibilityVisibleFrame(for screen: NSScreen) -> CGRect {
-        let visibleFrame = screen.visibleFrame
-        let screenFrame = screen.frame
-
-        guard let displayID = screen.directDisplayID else {
-            return CGRect(
-                x: visibleFrame.minX,
-                y: screenFrame.maxY - visibleFrame.maxY,
-                width: visibleFrame.width,
-                height: visibleFrame.height
-            )
+    static func currentWindowFrame(for element: AXUIElement) -> CGRect? {
+        guard let position = try? element.position(),
+              let size = try? element.size() else {
+            return nil
         }
 
-        let displayBounds = CGDisplayBounds(displayID)
+        let primaryScreenMaxY = NSScreen.screens.first?.frame.maxY ?? NSScreen.main?.frame.maxY ?? 0
         return CGRect(
-            x: displayBounds.minX + (visibleFrame.minX - screenFrame.minX),
-            y: displayBounds.minY + (screenFrame.maxY - visibleFrame.maxY),
-            width: visibleFrame.width,
-            height: visibleFrame.height
+            x: position.x,
+            y: primaryScreenMaxY - position.y - size.height,
+            width: size.width,
+            height: size.height
         )
     }
 
-    private static func screenContainingMost(of windowBounds: CGRect) -> NSScreen? {
+    static func screen(containing frame: CGRect) -> NSScreen? {
         let screen = NSScreen.screens.max {
-            accessibilityVisibleFrame(for: $0).intersection(windowBounds).area <
-                accessibilityVisibleFrame(for: $1).intersection(windowBounds).area
+            $0.frame.intersection(frame).area < $1.frame.intersection(frame).area
         }
 
-        guard let screen,
-              accessibilityVisibleFrame(for: screen).intersects(windowBounds) else {
+        guard let screen, screen.frame.intersects(frame) else {
             return nil
         }
 
@@ -112,11 +119,4 @@ private enum WindowLayoutScreenResolver {
 
 private extension CGRect {
     var area: CGFloat { max(width, 0) * max(height, 0) }
-}
-
-private extension NSScreen {
-    var directDisplayID: CGDirectDisplayID? {
-        (deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)
-            .map { CGDirectDisplayID($0.uint32Value) }
-    }
 }

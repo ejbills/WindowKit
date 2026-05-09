@@ -82,7 +82,7 @@ public struct CapturedWindow: Identifiable, Hashable, @unchecked Sendable {
 extension CapturedWindow {
     private static let axManipulationQueue = DispatchQueue(label: "com.windowkit.axManipulation", qos: .userInitiated)
 
-    private static func offMain<T>(_ work: @escaping () throws -> T) async throws -> T {
+    static func offMain<T>(_ work: @escaping () throws -> T) async throws -> T {
         try await withCheckedThrowingContinuation { continuation in
             axManipulationQueue.async {
                 do {
