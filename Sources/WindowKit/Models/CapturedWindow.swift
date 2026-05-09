@@ -354,4 +354,8 @@ public enum WindowEvent: Sendable {
     case windowChanged(CapturedWindow)
     case previewCaptured(CGWindowID, CGImage)
     case notificationBannerChanged
+    /// macOS reported that the system woke from sleep.
+    case systemWoke
+    /// WindowKit finished its post-wake AX recovery and full scan.
+    case wakeRecoveryCompleted
 }

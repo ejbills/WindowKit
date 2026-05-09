@@ -144,6 +144,7 @@ public final class WindowKit {
     }
 
     private static let launchTimeoutSeconds: TimeInterval = 30
+    private static let badgePollInterval: TimeInterval = 5
 
     private let tracker: WindowTracker
     private let badgeStore = DockBadgeStore()
@@ -152,7 +153,7 @@ public final class WindowKit {
     private var badgePollTimer: Timer?
     private let badgeQueue = DispatchQueue(label: "com.windowkit.badge", qos: .userInitiated)
     private var badgeRefreshInFlight = false
-    private var wakeCooldownWork: DispatchWorkItem?
+    private var shouldResumeBadgePollingAfterWake = false
     private var launchTimeoutWork: [pid_t: DispatchWorkItem] = [:]
 
     private init() {
@@ -216,13 +217,11 @@ public final class WindowKit {
                     self.invalidateAppState(forWindowID: id)
                 case .notificationBannerChanged:
                     self.refreshAllBadgesAndInvalidate()
+                case .systemWoke:
+                    self.pauseBadgePollingForWake()
+                case .wakeRecoveryCompleted:
+                    self.resumeBadgePollingAfterWake()
                 }
-            }
-            .store(in: &cancellables)
-
-        NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didWakeNotification)
-            .sink { [weak self] _ in
-                self?.handleWake()
             }
             .store(in: &cancellables)
     }
@@ -366,11 +365,11 @@ public final class WindowKit {
         tracker.stopTracking()
     }
 
-    /// Starts a 1-second polling timer for dock badge state.
+    /// Starts a 5-second polling timer for dock badge state.
     public func startBadgePolling() {
         stopBadgePolling()
         Logger.debug("Badge polling started")
-        badgePollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+        badgePollTimer = Timer.scheduledTimer(withTimeInterval: Self.badgePollInterval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.refreshAllBadges()
             }
@@ -378,9 +377,14 @@ public final class WindowKit {
     }
 
     public func stopBadgePolling() {
+        stopBadgePolling(clearWakeResume: true)
+    }
+
+    private func stopBadgePolling(clearWakeResume: Bool) {
         let wasActive = badgePollTimer != nil
-        wakeCooldownWork?.cancel()
-        wakeCooldownWork = nil
+        if clearWakeResume {
+            shouldResumeBadgePollingAfterWake = false
+        }
         badgePollTimer?.invalidate()
         badgePollTimer = nil
         if wasActive {
@@ -388,47 +392,26 @@ public final class WindowKit {
         }
     }
 
-    private func handleWake() {
+    private func pauseBadgePollingForWake() {
         guard badgePollTimer != nil else { return }
-        stopBadgePolling()
+        shouldResumeBadgePollingAfterWake = true
+        stopBadgePolling(clearWakeResume: false)
         badgeStore.invalidateCache()
+    }
 
-        // Wait for AX canary to pass before resuming badge polling.
-        let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            Task.detached(priority: .utility) {
-                var delay: TimeInterval = 1.0
-                var totalWaited: TimeInterval = 0
-                let maxWait: TimeInterval = 15.0
+    private func resumeBadgePollingAfterWake() {
+        guard shouldResumeBadgePollingAfterWake else { return }
+        shouldResumeBadgePollingAfterWake = false
 
-                while totalWaited < maxWait {
-                    try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-                    totalWaited += delay
-
-                    if isAccessibilityReady() {
-                        Logger.info("Badge polling: AX canary passed after \(String(format: "%.1f", totalWaited))s")
-                        break
-                    }
-
-                    delay = min(delay * 2, maxWait - totalWaited)
-                }
-
-                // Rebuild cache before resuming so first poll doesn't report spurious changes
-                await MainActor.run { [weak self] in
-                    guard let self else { return }
-                    let pids = self.trackedApplications.map(\.processIdentifier)
-                    self.badgeQueue.async { [badgeStore = self.badgeStore] in
-                        badgeStore.invalidateCache()
-                        _ = badgeStore.refreshAll(pids: pids)
-                        Task { @MainActor [weak self] in
-                            self?.startBadgePolling()
-                        }
-                    }
-                }
+        // Rebuild cache before resuming so first poll doesn't report spurious changes.
+        let pids = trackedApplications.map(\.processIdentifier)
+        badgeQueue.async { [badgeStore = self.badgeStore] in
+            badgeStore.invalidateCache()
+            _ = badgeStore.refreshAll(pids: pids)
+            Task { @MainActor [weak self] in
+                self?.startBadgePolling()
             }
         }
-        wakeCooldownWork = work
-        DispatchQueue.main.async(execute: work)
     }
 
     // MARK: - Per-App Observable State

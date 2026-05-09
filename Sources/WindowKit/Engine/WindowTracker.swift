@@ -649,6 +649,7 @@ public final class WindowTracker {
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
         ) { [weak self] _ in
             guard let self, self.isTracking else { return }
+            self.eventSubject.send(.systemWoke)
             Logger.info("System wake detected, starting canary-gated recovery")
 
             self.wakeRecoveryTask?.cancel()
@@ -700,6 +701,9 @@ public final class WindowTracker {
 
                 self.watcherManager?.resetAll()
                 self.notificationCenterWatcher?.reset()
+                await MainActor.run {
+                    self.eventSubject.send(.wakeRecoveryCompleted)
+                }
             }
         }
     }
