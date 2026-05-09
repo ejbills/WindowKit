@@ -67,7 +67,14 @@ public enum WindowSpaces {
     }
 
     public static func currentManagedSpaceID() throws -> CGSSpaceID {
-        guard let spaceID = try managedDisplays().first?.currentSpaceID else {
+        let displays = try managedDisplays()
+
+        if let mouseDisplayIdentifiers = displayIdentifiersContainingMouse(),
+           let display = displays.first(where: { mouseDisplayIdentifiers.contains($0.displayIdentifier) }) {
+            return display.currentSpaceID
+        }
+
+        guard let spaceID = displays.first?.currentSpaceID else {
             throw WindowSpaceError.currentSpaceUnavailable
         }
         return spaceID
@@ -89,6 +96,11 @@ public enum WindowSpaces {
             throw WindowSpaceError.invalidSpace(spaceID)
         }
 
+        let windowsToMove = windowIDs.filter { windowID in
+            !spaces(forWindowID: windowID).contains(spaceID)
+        }
+        guard !windowsToMove.isEmpty else { return }
+
         let operationName = "SLSBridgedMoveWindowsToManagedSpaceOperation"
         let initSelector = NSSelectorFromString("initWithWindows:spaceID:")
         let performSelector = NSSelectorFromString("performWithWMBridgeDelegate")
@@ -103,7 +115,7 @@ public enum WindowSpaces {
         typealias InitFunction = @convention(c) (AnyObject, Selector, AnyObject, UInt64) -> AnyObject
         typealias PerformFunction = @convention(c) (AnyObject, Selector) -> Void
 
-        let windows = windowIDs.map { NSNumber(value: UInt32($0)) } as NSArray
+        let windows = windowsToMove.map { NSNumber(value: UInt32($0)) } as NSArray
         let operation = unsafeBitCast(method_getImplementation(initMethod), to: InitFunction.self)(
             allocatedOperation,
             initSelector,
@@ -130,6 +142,31 @@ public enum WindowSpaces {
             return id
         }
         return (dictionary["id64"] as? NSNumber)?.uint64Value
+    }
+
+    private static func displayIdentifiersContainingMouse() -> Set<String>? {
+        let mouseLocation = NSEvent.mouseLocation
+        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) }),
+              let displayID = screen.directDisplayID else {
+            return nil
+        }
+
+        return Set([String(displayID), screen.displayUUIDString].compactMap { $0 })
+    }
+}
+
+private extension NSScreen {
+    var directDisplayID: CGDirectDisplayID? {
+        (deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)
+            .map { CGDirectDisplayID($0.uint32Value) }
+    }
+
+    var displayUUIDString: String? {
+        guard let directDisplayID,
+              let uuid = CGDisplayCreateUUIDFromDisplayID(directDisplayID)?.takeRetainedValue() else {
+            return nil
+        }
+        return CFUUIDCreateString(nil, uuid) as String
     }
 }
 
