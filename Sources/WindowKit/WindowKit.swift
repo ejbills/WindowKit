@@ -298,6 +298,11 @@ public final class WindowKit {
         try moveWindow(withID: id, toManagedSpace: currentManagedSpaceID())
     }
 
+    public func touchWindow(id: CGWindowID, pid: pid_t) {
+        tracker.touchWindow(id: id, pid: pid)
+        invalidateAppState(forPID: pid)
+    }
+
     public func closeWindow(_ window: CapturedWindow) async throws {
         try await tracker.closeWindow(window)
     }

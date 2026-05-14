@@ -90,11 +90,24 @@ public final class WindowRepository: @unchecked Sendable {
         var merged = oldWindows
 
         for window in windows where !suppressed.contains(window.id) {
+            let oldWindow = merged.first(where: { $0.id == window.id })
+
             var windowToInsert = window
+            if let oldWindow, oldWindow.lastInteractionTime > window.lastInteractionTime {
+                windowToInsert = CapturedWindow(
+                    id: window.id, title: window.title, ownerBundleID: window.ownerBundleID,
+                    ownerPID: window.ownerPID, bounds: window.bounds,
+                    isMinimized: window.isMinimized, isFullscreen: window.isFullscreen,
+                    isOwnerHidden: window.isOwnerHidden, isVisible: window.isVisible,
+                    owningDisplayID: window.owningDisplayID, desktopSpace: window.desktopSpace,
+                    lastInteractionTime: oldWindow.lastInteractionTime, creationTime: window.creationTime,
+                    axElement: window.axElement, appAxElement: window.appAxElement,
+                    closeButton: window.closeButton, subrole: window.subrole
+                )
+            }
 
             if windowToInsert.cachedPreview == nil,
-               let oldWindow = merged.first(where: { $0.id == window.id }),
-               oldWindow.cachedPreview != nil {
+               let oldWindow, oldWindow.cachedPreview != nil {
                 windowToInsert.cachedPreview = oldWindow.cachedPreview
                 windowToInsert.previewTimestamp = oldWindow.previewTimestamp
             }
@@ -132,6 +145,30 @@ public final class WindowRepository: @unchecked Sendable {
         var currentWindowSet = entries[pid] ?? []
         update(&currentWindowSet)
         entries[pid] = currentWindowSet
+    }
+
+    @discardableResult
+    public func touch(windowID: CGWindowID, pid: pid_t) -> CapturedWindow? {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        guard var windowSet = entries[pid],
+              let existing = windowSet.first(where: { $0.id == windowID }) else { return nil }
+        var updated = CapturedWindow(
+            id: existing.id, title: existing.title, ownerBundleID: existing.ownerBundleID,
+            ownerPID: existing.ownerPID, bounds: existing.bounds,
+            isMinimized: existing.isMinimized, isFullscreen: existing.isFullscreen,
+            isOwnerHidden: existing.isOwnerHidden, isVisible: existing.isVisible,
+            owningDisplayID: existing.owningDisplayID, desktopSpace: existing.desktopSpace,
+            lastInteractionTime: Date(), creationTime: existing.creationTime,
+            axElement: existing.axElement, appAxElement: existing.appAxElement,
+            closeButton: existing.closeButton, subrole: existing.subrole
+        )
+        updated.cachedPreview = existing.cachedPreview
+        updated.previewTimestamp = existing.previewTimestamp
+        windowSet.remove(existing)
+        windowSet.insert(updated)
+        entries[pid] = windowSet
+        return updated
     }
 
     public func removeEntry(pid: pid_t, windowID: CGWindowID) {

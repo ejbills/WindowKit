@@ -236,6 +236,11 @@ public final class WindowTracker {
         eventSubject.send(.windowDisappeared(window.id))
     }
 
+    public func touchWindow(id: CGWindowID, pid: pid_t) {
+        guard let updated = repository.touch(windowID: id, pid: pid) else { return }
+        eventSubject.send(.windowChanged(updated))
+    }
+
     public func capturePreview(for windowID: CGWindowID) async -> CGImage? {
         let screenshotService = discovery.screenshotService
         do {

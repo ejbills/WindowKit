@@ -137,6 +137,9 @@ extension CapturedWindow {
         }
         isOwnerHidden = newHidden
         if !newMinimized { isMinimized = false }
+        await MainActor.run {
+            WindowKit.shared.touchWindow(id: wid, pid: pid)
+        }
     }
 
     @discardableResult
