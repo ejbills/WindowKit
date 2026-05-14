@@ -288,6 +288,7 @@ public final class WindowTracker {
         case .applicationActivated(let app):
             repository.registerPID(app.processIdentifier)
             ensureWatching(pid: app.processIdentifier, reason: "applicationActivated")
+            touchFocusedWindow(for: app)
             debounce(key: "refresh-\(app.processIdentifier)") { [weak self] in
                 _ = await self?.trackApplication(app)
             }
@@ -524,29 +525,21 @@ public final class WindowTracker {
 
     private func updateWindowTimestamp(windowID: CGWindowID?, pid: pid_t) {
         guard let windowID else { return }
-        var focused: CapturedWindow?
-        repository.modify(forPID: pid) { windows in
-            if let existing = windows.first(where: { $0.id == windowID }) {
-                windows.remove(existing)
-                var updated = CapturedWindow(
-                    id: existing.id, title: existing.title, ownerBundleID: existing.ownerBundleID,
-                    ownerPID: existing.ownerPID, bounds: existing.bounds,
-                    isMinimized: existing.isMinimized, isFullscreen: existing.isFullscreen,
-                    isOwnerHidden: existing.isOwnerHidden, isVisible: existing.isVisible,
-                    owningDisplayID: existing.owningDisplayID, desktopSpace: existing.desktopSpace,
-                    lastInteractionTime: Date(), creationTime: existing.creationTime,
-                    axElement: existing.axElement, appAxElement: existing.appAxElement,
-                    closeButton: existing.closeButton, subrole: existing.subrole
-                )
-                updated.cachedPreview = existing.cachedPreview
-                updated.previewTimestamp = existing.previewTimestamp
-                windows.insert(updated)
-                focused = updated
-            }
+        if let touched = repository.touch(windowID: windowID, pid: pid) {
+            eventSubject.send(.windowChanged(touched))
         }
-        if let focused {
-            eventSubject.send(.windowChanged(focused))
+    }
+
+    private func touchFocusedWindow(for app: NSRunningApplication) {
+        let pid = app.processIdentifier
+        let appElement = AXUIElement.application(pid: pid)
+        guard let focusedWindow = try? appElement.focusedWindow(),
+              let windowID = try? focusedWindow.windowID()
+        else {
+            Logger.debug("Activated app has no focused window to touch", details: "pid=\(pid), name=\(app.localizedName ?? "?")")
+            return
         }
+        updateWindowTimestamp(windowID: windowID, pid: pid)
     }
 
     // MARK: - Destroy Burst Tapering
