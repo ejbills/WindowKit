@@ -93,7 +93,7 @@ window.desktopSpace        // Int?
 
 // Timestamps
 window.lastInteractionTime // Date
-window.creationTime        // Date
+window.creationTime        // Date (first AX observation)
 
 // Preview
 window.preview             // CGImage?

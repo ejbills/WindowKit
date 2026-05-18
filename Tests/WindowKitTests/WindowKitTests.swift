@@ -121,13 +121,49 @@ final class WindowKitTests: XCTestCase {
         XCTAssertEqual(changes2.removed.count, 0)
     }
 
+    func testCreationTimeIsPreservedOnStoreMerge() {
+        let repo = WindowRepository()
+        let pid: pid_t = 12345
+        let firstCreationTime = Date(timeIntervalSince1970: 100)
+        let rediscoveredCreationTime = Date(timeIntervalSince1970: 200)
+        let axElement = AXUIElementCreateSystemWide()
+
+        let firstWindow = makeMockWindow(
+            id: 300,
+            pid: pid,
+            title: "First",
+            creationTime: firstCreationTime,
+            axElement: axElement
+        )
+        let rediscoveredWindow = makeMockWindow(
+            id: 300,
+            pid: pid,
+            title: "Rediscovered",
+            creationTime: rediscoveredCreationTime,
+            axElement: axElement
+        )
+
+        repo.store(forPID: pid, windows: [firstWindow])
+        repo.store(forPID: pid, windows: [rediscoveredWindow])
+
+        let cached = repo.readCache(forPID: pid).first { $0.id == 300 }
+        XCTAssertEqual(cached?.title, "Rediscovered")
+        XCTAssertEqual(cached?.creationTime, firstCreationTime)
+    }
+
     // Helper to create mock CapturedWindow for testing
     // Note: These have invalid axElements and will be purged on fetch
-    private func makeMockWindow(id: CGWindowID, pid: pid_t) -> CapturedWindow {
-        let dummyAx = AXUIElementCreateSystemWide()
+    private func makeMockWindow(
+        id: CGWindowID,
+        pid: pid_t,
+        title: String? = nil,
+        creationTime: Date = Date(),
+        axElement: AXUIElement? = nil
+    ) -> CapturedWindow {
+        let dummyAx = axElement ?? AXUIElementCreateSystemWide()
         return CapturedWindow(
             id: id,
-            title: "Test Window \(id)",
+            title: title ?? "Test Window \(id)",
             ownerBundleID: "com.test.app",
             ownerPID: pid,
             bounds: CGRect(x: 0, y: 0, width: 800, height: 600),
@@ -137,7 +173,7 @@ final class WindowKitTests: XCTestCase {
             isVisible: true,
             desktopSpace: 1,
             lastInteractionTime: Date(),
-            creationTime: Date(),
+            creationTime: creationTime,
             axElement: dummyAx,
             appAxElement: dummyAx,
             closeButton: nil

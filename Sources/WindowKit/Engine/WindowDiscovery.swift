@@ -142,7 +142,11 @@ struct WindowDiscovery {
         let isHidden = app.isHidden
         let spaceID = scWindow.windowID.spaces().first
         let existingWindow = repository.readCache(windowID: scWindow.windowID)
-        let creationTime = existingWindow?.creationTime ?? Date()
+        let creationTime = if let existingWindow, existingWindow.axElement == axWindow {
+            existingWindow.creationTime
+        } else {
+            Date()
+        }
 
         var window = CapturedWindow(
             id: scWindow.windowID,
@@ -303,7 +307,11 @@ struct WindowDiscovery {
         let closeButton = try? axWindow.closeButton()
         let subrole = try? axWindow.subrole()
         let existingWindow = repository.readCache(windowID: windowID)
-        let creationTime = existingWindow?.creationTime ?? Date()
+        let creationTime = if let existingWindow, existingWindow.axElement == axWindow {
+            existingWindow.creationTime
+        } else {
+            Date()
+        }
 
         var window = CapturedWindow(
             id: windowID,

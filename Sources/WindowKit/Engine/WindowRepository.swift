@@ -93,14 +93,19 @@ public final class WindowRepository: @unchecked Sendable {
             let oldWindow = merged.first(where: { $0.id == window.id })
 
             var windowToInsert = window
+            if let oldWindow, oldWindow.axElement == window.axElement {
+                windowToInsert = windowToInsert.replacingCreationTime(oldWindow.creationTime)
+            }
+
             if let oldWindow, oldWindow.lastInteractionTime > window.lastInteractionTime {
+                let creationTime = oldWindow.axElement == window.axElement ? oldWindow.creationTime : window.creationTime
                 windowToInsert = CapturedWindow(
                     id: window.id, title: window.title, ownerBundleID: window.ownerBundleID,
                     ownerPID: window.ownerPID, bounds: window.bounds,
                     isMinimized: window.isMinimized, isFullscreen: window.isFullscreen,
                     isOwnerHidden: window.isOwnerHidden, isVisible: window.isVisible,
                     owningDisplayID: window.owningDisplayID, desktopSpace: window.desktopSpace,
-                    lastInteractionTime: oldWindow.lastInteractionTime, creationTime: window.creationTime,
+                    lastInteractionTime: oldWindow.lastInteractionTime, creationTime: creationTime,
                     axElement: window.axElement, appAxElement: window.appAxElement,
                     closeButton: window.closeButton, subrole: window.subrole
                 )

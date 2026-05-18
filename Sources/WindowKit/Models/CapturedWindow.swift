@@ -77,6 +77,31 @@ public struct CapturedWindow: Identifiable, Hashable, @unchecked Sendable {
     public static func == (lhs: CapturedWindow, rhs: CapturedWindow) -> Bool {
         lhs.id == rhs.id && lhs.ownerPID == rhs.ownerPID && lhs.axElement == rhs.axElement
     }
+
+    func replacingCreationTime(_ creationTime: Date) -> CapturedWindow {
+        var window = CapturedWindow(
+            id: id,
+            title: title,
+            ownerBundleID: ownerBundleID,
+            ownerPID: ownerPID,
+            bounds: bounds,
+            isMinimized: isMinimized,
+            isFullscreen: isFullscreen,
+            isOwnerHidden: isOwnerHidden,
+            isVisible: isVisible,
+            owningDisplayID: owningDisplayID,
+            desktopSpace: desktopSpace,
+            lastInteractionTime: lastInteractionTime,
+            creationTime: creationTime,
+            axElement: axElement,
+            appAxElement: appAxElement,
+            closeButton: closeButton,
+            subrole: subrole
+        )
+        window.cachedPreview = cachedPreview
+        window.previewTimestamp = previewTimestamp
+        return window
+    }
 }
 
 extension CapturedWindow {
