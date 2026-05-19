@@ -151,6 +151,35 @@ final class WindowKitTests: XCTestCase {
         XCTAssertEqual(cached?.creationTime, firstCreationTime)
     }
 
+    func testSuppressedWindowIsSkippedDuringRecoveryGracePeriod() {
+        let repo = WindowRepository()
+        let pid: pid_t = 12345
+        let window = makeMockWindow(id: 400, pid: pid)
+
+        repo.suppress(windowID: window.id, forPID: pid)
+        let changes = repo.store(forPID: pid, windows: [window])
+
+        XCTAssertFalse(changes.hasChanges)
+        XCTAssertTrue(repo.readCache(forPID: pid).isEmpty)
+        XCTAssertTrue(repo.isSuppressed(windowID: window.id, forPID: pid))
+    }
+
+    func testSuppressedWindowRecoversWhenRediscoveredAfterGracePeriod() async throws {
+        let repo = WindowRepository()
+        repo.suppressionRecoveryInterval = 0.01
+        let pid: pid_t = 12345
+        let window = makeMockWindow(id: 500, pid: pid)
+
+        repo.suppress(windowID: window.id, forPID: pid)
+        try await Task.sleep(nanoseconds: 20_000_000)
+
+        let changes = repo.store(forPID: pid, windows: [window])
+
+        XCTAssertEqual(changes.added.count, 1)
+        XCTAssertEqual(repo.readCache(forPID: pid).map(\.id), [window.id])
+        XCTAssertFalse(repo.isSuppressed(windowID: window.id, forPID: pid))
+    }
+
     // Helper to create mock CapturedWindow for testing
     // Note: These have invalid axElements and will be purged on fetch
     private func makeMockWindow(

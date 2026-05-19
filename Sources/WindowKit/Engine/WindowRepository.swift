@@ -18,8 +18,10 @@ public final class WindowRepository: @unchecked Sendable {
     public var ignoredPIDs: Set<pid_t> = []
 
     /// Window IDs explicitly closed by the user via close(). These are suppressed
-    /// from future discovery until the app creates new windows.
+    /// briefly to avoid rediscovering a window while the close is still settling.
     private var suppressedWindowIDs: [pid_t: Set<CGWindowID>] = [:]
+    private var suppressionTimestamps: [pid_t: [CGWindowID: Date]] = [:]
+    var suppressionRecoveryInterval: TimeInterval = 1.0
 
     public init() {}
 
@@ -85,11 +87,29 @@ public final class WindowRepository: @unchecked Sendable {
         cacheLock.lock()
         defer { cacheLock.unlock() }
 
+        let now = Date()
         let suppressed = suppressedWindowIDs[pid] ?? []
         let oldWindows = entries[pid] ?? []
         var merged = oldWindows
 
-        for window in windows where !suppressed.contains(window.id) {
+        for window in windows {
+            if suppressed.contains(window.id) {
+                let suppressedAt = suppressionTimestamps[pid]?[window.id] ?? .distantPast
+                guard now.timeIntervalSince(suppressedAt) >= suppressionRecoveryInterval else {
+                    continue
+                }
+
+                suppressedWindowIDs[pid]?.remove(window.id)
+                suppressionTimestamps[pid]?[window.id] = nil
+                if suppressedWindowIDs[pid]?.isEmpty == true {
+                    suppressedWindowIDs.removeValue(forKey: pid)
+                }
+                if suppressionTimestamps[pid]?.isEmpty == true {
+                    suppressionTimestamps.removeValue(forKey: pid)
+                }
+                Logger.debug("Recovered suppressed window", details: "pid=\(pid), windowID=\(window.id)")
+            }
+
             let oldWindow = merged.first(where: { $0.id == window.id })
 
             var windowToInsert = window
@@ -186,6 +206,7 @@ public final class WindowRepository: @unchecked Sendable {
         cacheLock.lock()
         defer { cacheLock.unlock() }
         suppressedWindowIDs[pid, default: []].insert(windowID)
+        suppressionTimestamps[pid, default: [:]][windowID] = Date()
         removeEntryInternal(pid: pid, windowID: windowID)
         Logger.debug("Suppressed window", details: "pid=\(pid), windowID=\(windowID)")
     }
@@ -193,7 +214,9 @@ public final class WindowRepository: @unchecked Sendable {
     public func clearSuppressions(forPID pid: pid_t) {
         cacheLock.lock()
         defer { cacheLock.unlock() }
-        if suppressedWindowIDs.removeValue(forKey: pid) != nil {
+        let hadSuppressions = suppressedWindowIDs.removeValue(forKey: pid) != nil
+        suppressionTimestamps.removeValue(forKey: pid)
+        if hadSuppressions {
             Logger.debug("Cleared suppressions", details: "pid=\(pid)")
         }
     }
@@ -217,12 +240,15 @@ public final class WindowRepository: @unchecked Sendable {
         defer { cacheLock.unlock() }
         entries.removeValue(forKey: pid)
         suppressedWindowIDs.removeValue(forKey: pid)
+        suppressionTimestamps.removeValue(forKey: pid)
     }
 
     public func clear() {
         cacheLock.lock()
         defer { cacheLock.unlock() }
         entries.removeAll()
+        suppressedWindowIDs.removeAll()
+        suppressionTimestamps.removeAll()
     }
 
     @discardableResult
