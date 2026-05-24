@@ -251,9 +251,27 @@ struct DockAppKey: Hashable {
         let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty { return nil }
         if let exact = Int(trimmed) { return exact }
+        if let formatted = formattedInteger(from: trimmed) { return formatted }
 
-        let digits = trimmed.split(whereSeparator: { !$0.isNumber }).first
-        return digits.flatMap { Int($0) }
+        let words = trimmed.components(separatedBy: .whitespacesAndNewlines)
+        for word in words {
+            if let formatted = formattedInteger(from: word) {
+                return formatted
+            }
+        }
+
+        return nil
+    }
+
+    private static func formattedInteger(from value: String) -> Int? {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.locale = .current
+        formatter.generatesDecimalNumbers = false
+        formatter.isLenient = false
+
+        guard let number = formatter.number(from: value) else { return nil }
+        return number.intValue
     }
 
     private static func dockItemURL(_ item: AXUIElement) -> URL? {

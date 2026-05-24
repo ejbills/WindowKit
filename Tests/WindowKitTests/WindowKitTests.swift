@@ -153,7 +153,9 @@ final class WindowKitTests: XCTestCase {
 
     func testBadgeCountParsingAcceptsStatusLabelsWithText() {
         XCTAssertEqual(DockAppKey.parsedBadgeCount(from: "7"), 7)
+        XCTAssertEqual(DockAppKey.parsedBadgeCount(from: "2,904"), 2904)
         XCTAssertEqual(DockAppKey.parsedBadgeCount(from: " 42 notifications "), 42)
+        XCTAssertEqual(DockAppKey.parsedBadgeCount(from: "1,234 unread"), 1234)
         XCTAssertEqual(DockAppKey.parsedBadgeCount(from: "Messages: 3 unread"), 3)
         XCTAssertNil(DockAppKey.parsedBadgeCount(from: ""))
         XCTAssertNil(DockAppKey.parsedBadgeCount(from: "has notifications"))
