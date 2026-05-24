@@ -152,7 +152,7 @@ let state = WindowKit.shared.windowState(for: someApp)
 | `allMinimized` / `isMinimized` | `Bool` | All windows are minimized |
 | `allHidden` / `isHidden` | `Bool` | All windows are hidden |
 | `badgeLabel` | `String?` | Dock badge text (`"3"` for counts, `""` for dot-only, `nil` for none) |
-| `badgeCount` | `Int?` | Numeric badge count parsed from `badgeLabel`, `nil` if absent or non-numeric |
+| `badgeCount` | `Int?` | Numeric badge count parsed from `badgeLabel`, including labels like `"3 notifications"`; `nil` if absent or no number exists |
 | `hasBadge` | `Bool` | Whether the app has a Dock badge |
 | `animation` | `Animation?` | Animation for state changes (default `.default`, set `nil` to disable) |
 
@@ -271,11 +271,14 @@ try window.fill(.topLeftQuarter)
 Dock badges update automatically via event-driven triggers (app activation, notification banners, window changes). However, some apps like Messages and Microsoft Teams update their dock badge silently without firing a notification banner. To catch these, enable badge polling:
 
 ```swift
-// Start 5-second polling for dock badge changes
+// Refresh immediately, then poll every 5 seconds for dock badge changes
 WindowKit.shared.startBadgePolling()
 
 // Stop when no longer needed (also stops automatically on endTracking())
 WindowKit.shared.stopBadgePolling()
+
+// Disable all badge refresh work, including event-driven notification refreshes
+WindowKit.shared.badgeTrackingEnabled = false
 ```
 
 Polling reads `AXStatusLabel` from cached dock element references, so each tick is lightweight. Only app states whose badge actually changed are invalidated.

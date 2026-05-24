@@ -151,6 +151,19 @@ final class WindowKitTests: XCTestCase {
         XCTAssertEqual(cached?.creationTime, firstCreationTime)
     }
 
+    func testBadgeCountParsingAcceptsStatusLabelsWithText() {
+        XCTAssertEqual(DockAppKey.parsedBadgeCount(from: "7"), 7)
+        XCTAssertEqual(DockAppKey.parsedBadgeCount(from: " 42 notifications "), 42)
+        XCTAssertEqual(DockAppKey.parsedBadgeCount(from: "Messages: 3 unread"), 3)
+        XCTAssertNil(DockAppKey.parsedBadgeCount(from: ""))
+        XCTAssertNil(DockAppKey.parsedBadgeCount(from: "has notifications"))
+    }
+
+    func testRemoveAllBadgesReportsRemovedPIDs() {
+        let store = DockBadgeStore()
+        XCTAssertEqual(store.removeAllBadges(), [])
+    }
+
     func testSuppressedWindowIsSkippedDuringRecoveryGracePeriod() {
         let repo = WindowRepository()
         let pid: pid_t = 12345
