@@ -90,6 +90,89 @@ public final class AppWindowState {
     }
 }
 
+private enum AppBadgeLookup: Hashable, Sendable {
+    case bundleIdentifier(String)
+    case bundlePath(String)
+
+    var bundleIdentifier: String? {
+        switch self {
+        case .bundleIdentifier(let bundleIdentifier):
+            return bundleIdentifier
+        case .bundlePath:
+            return nil
+        }
+    }
+
+    var bundleURL: URL? {
+        switch self {
+        case .bundleIdentifier:
+            return nil
+        case .bundlePath(let bundlePath):
+            return URL(fileURLWithPath: bundlePath)
+        }
+    }
+
+    var logDetails: String {
+        switch self {
+        case .bundleIdentifier(let bundleIdentifier):
+            return "bundleIdentifier=\(bundleIdentifier)"
+        case .bundlePath(let bundlePath):
+            return "bundlePath=\(bundlePath)"
+        }
+    }
+}
+
+@Observable
+@MainActor
+public final class AppBadgeState {
+    public let bundleIdentifier: String?
+    public let bundleURL: URL?
+    private let lookup: AppBadgeLookup
+    private let badgeStore: DockBadgeStore
+
+    private var badgeVersion: UInt = 0
+
+    public var badgeLabel: String? {
+        _ = badgeVersion
+        switch lookup {
+        case .bundleIdentifier(let bundleIdentifier):
+            return badgeStore.badge(forBundleIdentifier: bundleIdentifier)
+        case .bundlePath(let bundlePath):
+            return badgeStore.badge(forBundleURL: URL(fileURLWithPath: bundlePath))
+        }
+    }
+
+    public var hasBadge: Bool {
+        _ = badgeVersion
+        return badgeLabel != nil
+    }
+
+    public var badgeCount: Int? {
+        _ = badgeVersion
+        guard let label = badgeLabel else { return nil }
+        return DockAppKey.parsedBadgeCount(from: label)
+    }
+
+    init(bundleIdentifier: String, badgeStore: DockBadgeStore) {
+        self.lookup = .bundleIdentifier(bundleIdentifier)
+        self.bundleIdentifier = bundleIdentifier
+        self.bundleURL = nil
+        self.badgeStore = badgeStore
+    }
+
+    init(bundleURL: URL, badgeStore: DockBadgeStore) {
+        let standardizedURL = bundleURL.standardizedFileURL
+        self.lookup = .bundlePath(standardizedURL.path)
+        self.bundleIdentifier = Bundle(url: standardizedURL)?.bundleIdentifier
+        self.bundleURL = standardizedURL
+        self.badgeStore = badgeStore
+    }
+
+    func invalidate() {
+        badgeVersion &+= 1
+    }
+}
+
 @Observable
 @MainActor
 public final class WindowKit {
@@ -164,6 +247,7 @@ public final class WindowKit {
     private let badgeStore = DockBadgeStore()
     private var cancellables = Set<AnyCancellable>()
     @ObservationIgnored private var appStates: [pid_t: AppWindowState] = [:]
+    @ObservationIgnored private var badgeStates: [AppBadgeLookup: AppBadgeState] = [:]
     private var badgePollTimer: Timer?
     private let badgeQueue = DispatchQueue(label: "com.windowkit.badge", qos: .userInitiated)
     private var badgeRefreshInFlight = false
@@ -187,6 +271,7 @@ public final class WindowKit {
                     self.tracker.repository.registerPID(app.processIdentifier)
                     self.trackedApplications = self.tracker.repository.trackedApplications()
                     self.badgeStore.invalidateCache()
+                    self.refreshBadge(forPID: app.processIdentifier)
 
                 case .applicationTerminated(let pid):
                     self.cancelLaunchTimeout(for: pid)
@@ -196,6 +281,7 @@ public final class WindowKit {
                     self.badgeStore.invalidateCache()
                     self.appStates[pid]?.invalidateBadge()
                     self.appStates[pid]?.invalidate()
+                    self.refreshAllBadges()
 
                 case .applicationActivated:
                     self.frontmostApplication = self.tracker.frontmostApplication
@@ -429,15 +515,26 @@ public final class WindowKit {
 
         // Rebuild cache before resuming so first poll doesn't report spurious changes.
         let pids = trackedApplications.map(\.processIdentifier)
+        let badgeLookups = Array(badgeStates.keys)
+        let bundleIdentifiers = badgeLookups.compactMap(\.bundleIdentifier)
+        let bundleURLs = badgeLookups.compactMap(\.bundleURL)
         badgeQueue.async { [badgeStore = self.badgeStore] in
             badgeStore.invalidateCache()
-            let changed = badgeStore.refreshAll(pids: pids)
+            let changed = badgeStore.refreshAll(
+                pids: pids,
+                bundleIdentifiers: bundleIdentifiers,
+                bundleURLs: bundleURLs
+            )
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 guard self.badgeTrackingEnabled else { return }
-                for pid in changed {
+                for pid in changed.pids {
                     self.appStates[pid]?.invalidateBadge()
                 }
+                self.invalidateBadgeStates(
+                    bundleIdentifiers: changed.bundleIdentifiers,
+                    bundlePaths: changed.bundlePaths
+                )
                 self.startBadgePolling()
             }
         }
@@ -454,6 +551,25 @@ public final class WindowKit {
 
     public func windowState(for application: NSRunningApplication) -> AppWindowState {
         windowState(for: application.processIdentifier)
+    }
+
+    public func badgeState(forBundleIdentifier bundleIdentifier: String) -> AppBadgeState {
+        let lookup = AppBadgeLookup.bundleIdentifier(bundleIdentifier)
+        if let existing = badgeStates[lookup] { return existing }
+        let state = AppBadgeState(bundleIdentifier: bundleIdentifier, badgeStore: badgeStore)
+        badgeStates[lookup] = state
+        refreshBadge(forBundleIdentifier: bundleIdentifier)
+        return state
+    }
+
+    public func badgeState(forBundleURL bundleURL: URL) -> AppBadgeState {
+        let standardizedURL = bundleURL.standardizedFileURL
+        let lookup = AppBadgeLookup.bundlePath(standardizedURL.path)
+        if let existing = badgeStates[lookup] { return existing }
+        let state = AppBadgeState(bundleURL: standardizedURL, badgeStore: badgeStore)
+        badgeStates[lookup] = state
+        refreshBadge(forBundleURL: standardizedURL)
+        return state
     }
 
     private func invalidateAppState(forPID pid: pid_t) {
@@ -491,12 +607,18 @@ public final class WindowKit {
                 for pid in removed {
                     self.appStates[pid]?.invalidateBadge()
                 }
+                for state in self.badgeStates.values {
+                    state.invalidate()
+                }
             }
         }
     }
 
     private func refreshBadge(forPID pid: pid_t) {
         guard badgeTrackingEnabled else { return }
+        let app = NSRunningApplication(processIdentifier: pid)
+        let bundleIdentifier = app?.bundleIdentifier
+        let bundlePath = app?.bundleURL?.standardizedFileURL.path
         badgeQueue.async { [badgeStore, weak self] in
             let changed = badgeStore.refresh(forPID: pid)
             if changed {
@@ -504,6 +626,42 @@ public final class WindowKit {
                 Task { @MainActor [weak self] in
                     guard let self, self.badgeTrackingEnabled else { return }
                     self.appStates[pid]?.invalidateBadge()
+                    if let bundleIdentifier {
+                        self.badgeStates[.bundleIdentifier(bundleIdentifier)]?.invalidate()
+                    }
+                    if let bundlePath {
+                        self.badgeStates[.bundlePath(bundlePath)]?.invalidate()
+                    }
+                }
+            }
+        }
+    }
+
+    private func refreshBadge(forBundleIdentifier bundleIdentifier: String) {
+        guard badgeTrackingEnabled else { return }
+        badgeQueue.async { [badgeStore, weak self] in
+            let changed = badgeStore.refresh(bundleIdentifier: bundleIdentifier)
+            if changed {
+                Logger.debug("Badge changed", details: "bundleIdentifier=\(bundleIdentifier)")
+                Task { @MainActor [weak self] in
+                    guard let self, self.badgeTrackingEnabled else { return }
+                    self.badgeStates[.bundleIdentifier(bundleIdentifier)]?.invalidate()
+                }
+            }
+        }
+    }
+
+    private func refreshBadge(forBundleURL bundleURL: URL) {
+        guard badgeTrackingEnabled else { return }
+        let standardizedURL = bundleURL.standardizedFileURL
+        let lookup = AppBadgeLookup.bundlePath(standardizedURL.path)
+        badgeQueue.async { [badgeStore, weak self] in
+            let changed = badgeStore.refresh(bundleURL: standardizedURL)
+            if changed {
+                Logger.debug("Badge changed", details: lookup.logDetails)
+                Task { @MainActor [weak self] in
+                    guard let self, self.badgeTrackingEnabled else { return }
+                    self.badgeStates[lookup]?.invalidate()
                 }
             }
         }
@@ -523,10 +681,23 @@ public final class WindowKit {
         }
 
         let pids = allPIDs
+        let badgeLookups = Array(badgeStates.keys)
+        let bundleIdentifiers = badgeLookups.compactMap(\.bundleIdentifier)
+        let bundleURLs = badgeLookups.compactMap(\.bundleURL)
         badgeQueue.async { [badgeStore, weak self] in
-            let changed = badgeStore.refreshAll(pids: pids)
+            let changed = badgeStore.refreshAll(
+                pids: pids,
+                bundleIdentifiers: bundleIdentifiers,
+                bundleURLs: bundleURLs
+            )
             if !changed.isEmpty {
-                Logger.debug("Badge poll found changes", details: "pids=\(changed)")
+                Logger.debug(
+                    "Badge poll found changes",
+                    details: """
+                    pids=\(changed.pids) bundleIdentifiers=\(changed.bundleIdentifiers) \
+                    bundlePaths=\(changed.bundlePaths)
+                    """
+                )
             }
             Task { @MainActor [weak self] in
                 guard let self else { return }
@@ -535,10 +706,23 @@ public final class WindowKit {
                     return
                 }
                 self.badgeRefreshInFlight = false
-                for pid in changed {
+                for pid in changed.pids {
                     self.appStates[pid]?.invalidateBadge()
                 }
+                self.invalidateBadgeStates(
+                    bundleIdentifiers: changed.bundleIdentifiers,
+                    bundlePaths: changed.bundlePaths
+                )
             }
+        }
+    }
+
+    private func invalidateBadgeStates(bundleIdentifiers: Set<String>, bundlePaths: Set<String>) {
+        for bundleIdentifier in bundleIdentifiers {
+            badgeStates[.bundleIdentifier(bundleIdentifier)]?.invalidate()
+        }
+        for bundlePath in bundlePaths {
+            badgeStates[.bundlePath(bundlePath)]?.invalidate()
         }
     }
 

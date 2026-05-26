@@ -3,6 +3,7 @@ import Cocoa
 
 public final class DockBadgeStore: @unchecked Sendable {
     private var badges: [pid_t: String] = [:]
+    private var identityBadges: [DockAppKey: String] = [:]
     private let lock = NSLock()
 
     /// Cached dock AXUIElement references keyed by stable app identity for fast polling.
@@ -17,6 +18,20 @@ public final class DockBadgeStore: @unchecked Sendable {
         return badges[pid]
     }
 
+    public func badge(forBundleIdentifier bundleIdentifier: String) -> String? {
+        let key = DockAppKey.bundleIdentifier(bundleIdentifier)
+        lock.lock()
+        defer { lock.unlock() }
+        return key.flatMap { identityBadges[$0] }
+    }
+
+    public func badge(forBundleURL bundleURL: URL) -> String? {
+        let key = DockAppKey.bundlePath(bundleURL)
+        lock.lock()
+        defer { lock.unlock() }
+        return key.flatMap { identityBadges[$0] }
+    }
+
     public func removeBadge(forPID pid: pid_t) {
         lock.lock()
         defer { lock.unlock() }
@@ -29,6 +44,7 @@ public final class DockBadgeStore: @unchecked Sendable {
         defer { lock.unlock() }
         let removed = Set(badges.keys)
         badges.removeAll()
+        identityBadges.removeAll()
         return removed
     }
 
@@ -56,8 +72,54 @@ public final class DockBadgeStore: @unchecked Sendable {
         return updateBadge(forPID: pid, statusLabel: nil)
     }
 
+    /// Refresh badge for an app identity even when the app process is not running.
+    /// Returns true if the badge value changed.
+    @discardableResult
+    public func refresh(bundleIdentifier: String) -> Bool {
+        guard let appKey = DockAppKey.bundleIdentifier(bundleIdentifier) else { return false }
+
+        if let cachedElements = getCachedElements(for: [appKey]) {
+            return updateBadge(forKeys: [appKey], resolution: resolvedStatusLabel(for: cachedElements))
+        }
+
+        rebuildCache()
+
+        if let cachedElements = getCachedElements(for: [appKey]) {
+            return updateBadge(forKeys: [appKey], resolution: resolvedStatusLabel(for: cachedElements))
+        }
+
+        return updateBadge(forKeys: [appKey], statusLabel: nil)
+    }
+
+    /// Refresh badge for a specific bundle path even when the app process is not running.
+    /// Returns true if the badge value changed.
+    @discardableResult
+    public func refresh(bundleURL: URL) -> Bool {
+        guard let appKey = DockAppKey.bundlePath(bundleURL) else { return false }
+
+        if let cachedElements = getCachedElements(for: [appKey]) {
+            return updateBadge(forKeys: [appKey], resolution: resolvedStatusLabel(for: cachedElements))
+        }
+
+        rebuildCache()
+
+        if let cachedElements = getCachedElements(for: [appKey]) {
+            return updateBadge(forKeys: [appKey], resolution: resolvedStatusLabel(for: cachedElements))
+        }
+
+        return updateBadge(forKeys: [appKey], statusLabel: nil)
+    }
+
     /// Refresh all badges in a single dock traversal. Returns the set of PIDs whose badge changed.
     public func refreshAll(pids: [pid_t]) -> Set<pid_t> {
+        refreshAll(pids: pids, bundleIdentifiers: []).pids
+    }
+
+    public func refreshAll(
+        pids: [pid_t],
+        bundleIdentifiers: [String],
+        bundleURLs: [URL] = []
+    ) -> DockBadgeRefreshChanges {
         // Build app identity lookup. Bundle/path keys avoid localized-title collisions.
         var appKeysByPID: [pid_t: [DockAppKey]] = [:]
         for pid in pids {
@@ -68,7 +130,22 @@ public final class DockBadgeStore: @unchecked Sendable {
             }
         }
 
-        guard !appKeysByPID.isEmpty else { return [] }
+        var keysByBundleIdentifier: [String: [DockAppKey]] = [:]
+        for bundleIdentifier in bundleIdentifiers {
+            guard let key = DockAppKey.bundleIdentifier(bundleIdentifier) else { continue }
+            keysByBundleIdentifier[bundleIdentifier] = [key]
+        }
+
+        var keysByBundlePath: [String: [DockAppKey]] = [:]
+        for bundleURL in bundleURLs {
+            guard let key = DockAppKey.bundlePath(bundleURL),
+                  let bundlePath = key.bundlePath else { continue }
+            keysByBundlePath[bundlePath] = [key]
+        }
+
+        guard !appKeysByPID.isEmpty || !keysByBundleIdentifier.isEmpty || !keysByBundlePath.isEmpty else {
+            return DockBadgeRefreshChanges()
+        }
 
         // Ensure cache is populated
         lock.lock()
@@ -79,20 +156,27 @@ public final class DockBadgeStore: @unchecked Sendable {
         }
 
         // Single pass: read AXStatusLabel from cached elements
-        var changed = Set<pid_t>()
+        var changedPIDs = Set<pid_t>()
+        var changedBundleIdentifiers = Set<String>()
+        var changedBundlePaths = Set<String>()
         var found = Set<pid_t>()
+        var foundBundleIdentifiers = Set<String>()
+        var foundBundlePaths = Set<String>()
 
         lock.lock()
         let cache = cachedDockElements
         lock.unlock()
 
-        guard !cache.isEmpty else { return [] }
+        guard !cache.isEmpty else { return DockBadgeRefreshChanges() }
 
         for (pid, appKeys) in appKeysByPID {
             if let element = DockAppKey.element(for: appKeys, in: cache) {
                 let statusLabel = try? element.attribute("AXStatusLabel", as: String.self)
                 if updateBadge(forPID: pid, statusLabel: statusLabel) {
-                    changed.insert(pid)
+                    changedPIDs.insert(pid)
+                }
+                if updateBadge(forKeys: appKeys, statusLabel: statusLabel) {
+                    changedBundleIdentifiers.formUnion(DockAppKey.bundleIdentifiers(in: appKeys))
                 }
                 found.insert(pid)
             }
@@ -101,11 +185,49 @@ public final class DockBadgeStore: @unchecked Sendable {
         // Clear badges for apps not found in dock
         for pid in appKeysByPID.keys where !found.contains(pid) {
             if updateBadge(forPID: pid, statusLabel: nil) {
-                changed.insert(pid)
+                changedPIDs.insert(pid)
+            }
+            let appKeys = appKeysByPID[pid] ?? []
+            if updateBadge(forKeys: appKeys, statusLabel: nil) {
+                changedBundleIdentifiers.formUnion(DockAppKey.bundleIdentifiers(in: appKeys))
             }
         }
 
-        return changed
+        for (bundleIdentifier, appKeys) in keysByBundleIdentifier {
+            if let elements = DockAppKey.elements(for: appKeys, in: cache) {
+                if updateBadge(forKeys: appKeys, resolution: resolvedStatusLabel(for: elements)) {
+                    changedBundleIdentifiers.insert(bundleIdentifier)
+                }
+                foundBundleIdentifiers.insert(bundleIdentifier)
+            }
+        }
+
+        for (bundleIdentifier, appKeys) in keysByBundleIdentifier where !foundBundleIdentifiers.contains(bundleIdentifier) {
+            if updateBadge(forKeys: appKeys, statusLabel: nil) {
+                changedBundleIdentifiers.insert(bundleIdentifier)
+            }
+        }
+
+        for (bundlePath, appKeys) in keysByBundlePath {
+            if let elements = DockAppKey.elements(for: appKeys, in: cache) {
+                if updateBadge(forKeys: appKeys, resolution: resolvedStatusLabel(for: elements)) {
+                    changedBundlePaths.insert(bundlePath)
+                }
+                foundBundlePaths.insert(bundlePath)
+            }
+        }
+
+        for (bundlePath, appKeys) in keysByBundlePath where !foundBundlePaths.contains(bundlePath) {
+            if updateBadge(forKeys: appKeys, statusLabel: nil) {
+                changedBundlePaths.insert(bundlePath)
+            }
+        }
+
+        return DockBadgeRefreshChanges(
+            pids: changedPIDs,
+            bundleIdentifiers: changedBundleIdentifiers,
+            bundlePaths: changedBundlePaths
+        )
     }
 
     /// Invalidates cached dock element references. Call when dock items may have changed
@@ -123,6 +245,12 @@ public final class DockBadgeStore: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return DockAppKey.element(for: appKeys, in: cachedDockElements)
+    }
+
+    private func getCachedElements(for appKeys: [DockAppKey]) -> [AXUIElement]? {
+        lock.lock()
+        defer { lock.unlock() }
+        return DockAppKey.elements(for: appKeys, in: cachedDockElements)
     }
 
     private func rebuildCache() {
@@ -150,7 +278,7 @@ public final class DockBadgeStore: @unchecked Sendable {
             guard let subrole = try? item.subrole(),
                   subrole == "AXApplicationDockItem" else { continue }
             for key in DockAppKey.keys(forDockItem: item) {
-                cachedDockElements[key, default: .element(item)].merge(item)
+                cachedDockElements[key, default: .elements([])].merge(item)
             }
         }
         lock.unlock()
@@ -168,29 +296,98 @@ public final class DockBadgeStore: @unchecked Sendable {
         lock.unlock()
         return oldValue != statusLabel
     }
+
+    private func updateBadge(forKeys keys: [DockAppKey], statusLabel: String?) -> Bool {
+        lock.lock()
+        var changed = false
+        for key in keys {
+            let oldValue = identityBadges[key]
+            if let statusLabel {
+                identityBadges[key] = statusLabel
+            } else {
+                identityBadges.removeValue(forKey: key)
+            }
+            changed = changed || oldValue != statusLabel
+        }
+        lock.unlock()
+        return changed
+    }
+
+    private func updateBadge(forKeys keys: [DockAppKey], resolution: StatusLabelResolution) -> Bool {
+        switch resolution {
+        case .value(let statusLabel):
+            return updateBadge(forKeys: keys, statusLabel: statusLabel)
+        case .ambiguous:
+            return updateBadge(forKeys: keys, statusLabel: nil)
+        }
+    }
+
+    private func resolvedStatusLabel(for elements: [AXUIElement]) -> StatusLabelResolution {
+        var resolvedLabel: String?
+        var hasResolvedLabel = false
+
+        for element in elements {
+            let statusLabel = try? element.attribute("AXStatusLabel", as: String.self)
+            if !hasResolvedLabel {
+                resolvedLabel = statusLabel
+                hasResolvedLabel = true
+            } else if resolvedLabel != statusLabel {
+                return .ambiguous
+            }
+        }
+
+        return .value(resolvedLabel)
+    }
+}
+
+public struct DockBadgeRefreshChanges: Sendable {
+    public let pids: Set<pid_t>
+    public let bundleIdentifiers: Set<String>
+    public let bundlePaths: Set<String>
+
+    public var isEmpty: Bool {
+        pids.isEmpty && bundleIdentifiers.isEmpty && bundlePaths.isEmpty
+    }
+
+    public init(
+        pids: Set<pid_t> = [],
+        bundleIdentifiers: Set<String> = [],
+        bundlePaths: Set<String> = []
+    ) {
+        self.pids = pids
+        self.bundleIdentifiers = bundleIdentifiers
+        self.bundlePaths = bundlePaths
+    }
+}
+
+private enum StatusLabelResolution {
+    case value(String?)
+    case ambiguous
 }
 
 enum CachedDockElement {
-    case element(AXUIElement)
-    case ambiguous
+    case elements([AXUIElement])
 
     var element: AXUIElement? {
         switch self {
-        case .element(let element):
-            return element
-        case .ambiguous:
-            return nil
+        case .elements(let elements):
+            return elements.count == 1 ? elements[0] : nil
+        }
+    }
+
+    var elements: [AXUIElement] {
+        switch self {
+        case .elements(let elements):
+            return elements
         }
     }
 
     mutating func merge(_ newElement: AXUIElement) {
         switch self {
-        case .element(let existingElement) where CFEqual(existingElement, newElement):
-            break
-        case .element:
-            self = .ambiguous
-        case .ambiguous:
-            break
+        case .elements(var elements):
+            guard !elements.contains(where: { CFEqual($0, newElement) }) else { return }
+            elements.append(newElement)
+            self = .elements(elements)
         }
     }
 }
@@ -204,6 +401,18 @@ struct DockAppKey: Hashable {
 
     private let kind: Kind
     private let value: String
+
+    static func bundleIdentifier(_ bundleIdentifier: String) -> DockAppKey? {
+        normalized(bundleIdentifier).map { DockAppKey(kind: .bundleIdentifier, value: $0) }
+    }
+
+    static func bundlePath(_ bundleURL: URL) -> DockAppKey? {
+        normalizedPath(bundleURL).map { DockAppKey(kind: .bundlePath, value: $0) }
+    }
+
+    var bundlePath: String? {
+        kind == .bundlePath ? value : nil
+    }
 
     static func keys(for app: NSRunningApplication) -> [DockAppKey] {
         var keys: [DockAppKey] = []
@@ -245,6 +454,21 @@ struct DockAppKey: Hashable {
             }
         }
         return nil
+    }
+
+    static func elements(for keys: [DockAppKey], in cache: [DockAppKey: CachedDockElement]) -> [AXUIElement]? {
+        for key in keys {
+            if let elements = cache[key]?.elements, !elements.isEmpty {
+                return elements
+            }
+        }
+        return nil
+    }
+
+    static func bundleIdentifiers(in keys: [DockAppKey]) -> Set<String> {
+        Set(keys.compactMap { key in
+            key.kind == .bundleIdentifier ? key.value : nil
+        })
     }
 
     static func parsedBadgeCount(from label: String) -> Int? {

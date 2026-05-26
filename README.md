@@ -170,6 +170,16 @@ struct DockIcon: View {
 
 State is invalidated automatically on window appear/disappear/change, preview capture, and app termination. No data is duplicated — all properties read through to the single window repository.
 
+Dock badges can also be observed without a running app process:
+
+```swift
+let badge = WindowKit.shared.badgeState(forBundleIdentifier: "com.apple.MobileSMS")
+// or, to disambiguate multiple Dock entries with the same bundle identifier:
+let exactBadge = WindowKit.shared.badgeState(forBundleURL: appBundleURL)
+```
+
+Bundle-identifier badge state reads the app's Dock item directly, so it can update while the app is not running. If multiple Dock items share the same bundle identifier, WindowKit only reports a bundle-id badge when those Dock items agree on the same badge value; use the bundle-URL API when you need a specific Dock item.
+
 ### Events
 
 Subscribe to window lifecycle changes via Combine:
