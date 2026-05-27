@@ -11,6 +11,11 @@ struct WindowDiscovery {
 
     private typealias AXCandidate = (axWindow: AXUIElement, windowID: CGWindowID, descriptor: CGWindowDescriptor)
 
+    struct DiscoveryResult {
+        var windows: [CapturedWindow]
+        var externallyVisibleWindowIDs: Set<CGWindowID>
+    }
+
     /// Runs synchronous work on axWorkQueue, guaranteed off main thread.
     /// Returns nil if the parent task was cancelled before work began.
     private func onAXQueue<T: Sendable>(_ work: @escaping @Sendable () -> T) async -> T? {
@@ -52,13 +57,19 @@ struct WindowDiscovery {
     }
 
     func discoverAll(for app: NSRunningApplication) async -> [CapturedWindow] {
+        await discoverAllWithVisibility(for: app).windows
+    }
+
+    func discoverAllWithVisibility(for app: NSRunningApplication) async -> DiscoveryResult {
         let pid = app.processIdentifier
         var discoveredWindows: [CapturedWindow] = []
+        var externallyVisibleWindowIDs = Set<CGWindowID>()
 
         if #available(macOS 12.3, *), SystemPermissions.hasScreenRecording() {
-            if let sckWindows = await discoverViaSCK(for: app) {
-                Logger.debug("SCK discovery complete", details: "pid=\(pid), found=\(sckWindows.count)")
-                discoveredWindows.append(contentsOf: sckWindows)
+            if let sckResult = await discoverViaSCK(for: app) {
+                Logger.debug("SCK discovery complete", details: "pid=\(pid), found=\(sckResult.windows.count)")
+                discoveredWindows.append(contentsOf: sckResult.windows)
+                externallyVisibleWindowIDs.formUnion(sckResult.visibleWindowIDs)
             }
         }
 
@@ -67,11 +78,14 @@ struct WindowDiscovery {
         Logger.debug("AX discovery complete", details: "pid=\(pid), found=\(axWindows.count)")
         discoveredWindows.append(contentsOf: axWindows)
 
-        return discoveredWindows
+        return DiscoveryResult(windows: discoveredWindows, externallyVisibleWindowIDs: externallyVisibleWindowIDs)
     }
 
     @available(macOS 12.3, *)
-    private func discoverViaSCK(for app: NSRunningApplication, skipIDs: Set<CGWindowID> = []) async -> [CapturedWindow]? {
+    private func discoverViaSCK(
+        for app: NSRunningApplication,
+        skipIDs: Set<CGWindowID> = []
+    ) async -> (windows: [CapturedWindow], visibleWindowIDs: Set<CGWindowID>)? {
         let pid = app.processIdentifier
 
         let contentResult: SCShareableContent? = await ConcurrencyHelpers.withTimeoutOptional {
@@ -85,16 +99,17 @@ struct WindowDiscovery {
         let appWindows = content.windows.filter {
             $0.owningApplication?.processID == pid && !skipIDs.contains($0.windowID)
         }
+        let validAppWindows = appWindows.filter(isValidSCKWindow)
+        let visibleWindowIDs = Set(validAppWindows.map(\.windowID))
         let freshIDs = repository.windowIDsWithFreshPreviews(forPID: pid)
 
-        let results: [CapturedWindow] = await ConcurrencyHelpers.mapConcurrent(appWindows, maxConcurrent: 4, timeout: 10) { scWindow -> CapturedWindow? in
-            guard self.isValidSCKWindow(scWindow) else { return nil }
+        let results: [CapturedWindow] = await ConcurrencyHelpers.mapConcurrent(validAppWindows, maxConcurrent: 4, timeout: 10) { scWindow -> CapturedWindow? in
             return await self.onAXQueue {
                 self.captureFromSCKWindow(scWindow, app: app, freshIDs: freshIDs)
             } ?? nil
         }
 
-        return results
+        return (results, visibleWindowIDs)
     }
 
     @available(macOS 12.3, *)

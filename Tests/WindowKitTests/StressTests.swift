@@ -1106,6 +1106,23 @@ final class CatastrophicStressTests: XCTestCase {
             "Purify with all-reject validator should remove everything — this is the bug the canary gate prevents")
     }
 
+    func testPurifyPreservesSCKVisibleWindowDuringAXDegradation() {
+        let repo = WindowRepository()
+        let pid: pid_t = 22222
+        let visibleButAXDegraded = makeMockWindow(id: 100, pid: pid)
+        let genuinelyGone = makeMockWindow(id: 200, pid: pid)
+
+        repo.store(forPID: pid, windows: [visibleButAXDegraded, genuinelyGone])
+
+        let remaining = repo.purify(
+            forPID: pid,
+            preservingWindowIDs: [visibleButAXDegraded.id]
+        ) { _ in false }
+
+        XCTAssertEqual(Set(remaining.map(\.id)), [visibleButAXDegraded.id])
+        XCTAssertEqual(Set(repo.readCache(forPID: pid).map(\.id)), [visibleButAXDegraded.id])
+    }
+
     // MARK: - Notification Storm Simulation
 
     func testNotificationStormDoesNotBlockMainThread() async {

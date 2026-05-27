@@ -159,14 +159,19 @@ public final class WindowTracker {
         let task = Task<[CapturedWindow], Never> {
             Logger.debug("Tracking application", details: "pid=\(pid), name=\(appName), policy=\(policy.rawValue)")
 
-            let discoveredWindows = await discovery.discoverAll(for: app)
+            let discoveryResult = await discovery.discoverAllWithVisibility(for: app)
             guard !Task.isCancelled else { return [] }
+            let discoveredWindows = discoveryResult.windows
 
             let changes = repository.store(forPID: pid, windows: Set(discoveredWindows))
             emitChanges(changes)
 
             let beforeIDs = Set(repository.readCache(forPID: pid).map(\.id))
-            repository.purify(forPID: pid, validator: { enumerator.isValidElement($0) })
+            repository.purify(
+                forPID: pid,
+                preservingWindowIDs: discoveryResult.externallyVisibleWindowIDs,
+                validator: { enumerator.isValidElement($0) }
+            )
             let afterIDs = Set(repository.readCache(forPID: pid).map(\.id))
             for staleID in beforeIDs.subtracting(afterIDs) {
                 eventSubject.send(.windowDisappeared(staleID))
@@ -189,16 +194,9 @@ public final class WindowTracker {
         Logger.info("Performing full window scan")
         let startTime = CFAbsoluteTimeGetCurrent()
 
-        var processedPIDs = Set<pid_t>()
-
         let apps = processWatcher.runningApplications()
         for app in apps {
             _ = await trackApplication(app)
-            processedPIDs.insert(app.processIdentifier)
-        }
-
-        for pid in processedPIDs {
-            _ = repository.purify(forPID: pid, validator: { enumerator.isValidElement($0) })
         }
 
         let elapsed = (CFAbsoluteTimeGetCurrent() - startTime) * 1000
@@ -327,7 +325,7 @@ public final class WindowTracker {
         // Post-cooldown full scan covers these; suppress to avoid redundant refreshes.
         if isInWakeCooldown {
             switch event {
-            case .windowCreated, .windowResized, .windowMoved, .applicationRevealed:
+            case .windowCreated, .windowDestroyed, .windowResized, .windowMoved, .applicationRevealed:
                 Logger.debug("Suppressing AX event during wake cooldown", details: "pid=\(pid), event=\(event)")
                 return
             default:
@@ -694,11 +692,11 @@ public final class WindowTracker {
                 }
 
                 guard !Task.isCancelled, self.isTracking else { return }
-                self.wakeCooldownUntil = nil
                 await self.performFullScan()
 
                 self.watcherManager?.resetAll()
                 self.notificationCenterWatcher?.reset()
+                self.wakeCooldownUntil = nil
                 await MainActor.run {
                     self.eventSubject.send(.wakeRecoveryCompleted)
                 }
