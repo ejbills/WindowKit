@@ -156,6 +156,11 @@ let state = WindowKit.shared.windowState(for: someApp)
 | `hasBadge` | `Bool` | Whether the app has a Dock badge |
 | `animation` | `Animation?` | Animation for state changes (default `.default`, set `nil` to disable) |
 
+Dot-only Dock badges are reported through the same badge system: `hasBadge == true`,
+`badgeLabel == ""`, and `badgeCount == nil`. WindowKit normalizes empty labels,
+dot-like labels, and generic no-count status labels such as `"has notifications"`
+to that dot-only representation.
+
 ```swift
 struct DockIcon: View {
     let app: NSRunningApplication
@@ -292,6 +297,8 @@ WindowKit.shared.badgeTrackingEnabled = false
 ```
 
 Polling reads `AXStatusLabel` from cached dock element references, so each tick is lightweight. Only app states whose badge actually changed are invalidated.
+
+Download/progress indicators drawn on Dock icons are not notification badges; they are visual progress overlays and are not reported as `badgeLabel`.
 
 ## Configuration
 

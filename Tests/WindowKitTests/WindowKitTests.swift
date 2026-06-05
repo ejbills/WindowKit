@@ -161,6 +161,20 @@ final class WindowKitTests: XCTestCase {
         XCTAssertNil(DockAppKey.parsedBadgeCount(from: "has notifications"))
     }
 
+    func testBadgeStatusLabelNormalizationUsesEmptyStringForDots() {
+        XCTAssertEqual(DockAppKey.normalizedBadgeLabel(fromStatusLabel: ""), "")
+        XCTAssertEqual(DockAppKey.normalizedBadgeLabel(fromStatusLabel: "  "), "")
+        XCTAssertEqual(DockAppKey.normalizedBadgeLabel(fromStatusLabel: "."), "")
+        XCTAssertEqual(DockAppKey.normalizedBadgeLabel(fromStatusLabel: "•"), "")
+        XCTAssertEqual(DockAppKey.normalizedBadgeLabel(fromStatusLabel: "has notifications"), "")
+    }
+
+    func testBadgeStatusLabelNormalizationKeepsCountsAndCustomText() {
+        XCTAssertEqual(DockAppKey.normalizedBadgeLabel(fromStatusLabel: "7"), "7")
+        XCTAssertEqual(DockAppKey.normalizedBadgeLabel(fromStatusLabel: " 42 notifications "), "42 notifications")
+        XCTAssertEqual(DockAppKey.normalizedBadgeLabel(fromStatusLabel: "NEW"), "NEW")
+    }
+
     func testRemoveAllBadgesReportsRemovedPIDs() {
         let store = DockBadgeStore()
         XCTAssertEqual(store.removeAllBadges(), [])
