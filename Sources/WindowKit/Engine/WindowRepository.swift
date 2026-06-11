@@ -27,7 +27,7 @@ public final class WindowRepository: @unchecked Sendable {
 
     public func trackedApplications() -> [NSRunningApplication] {
         cacheLock.lock()
-        let pids = Set(entries.keys)
+        let pids = entries.keys.sorted()
         cacheLock.unlock()
         return pids.compactMap { pid in
             guard let app = NSRunningApplication(processIdentifier: pid),

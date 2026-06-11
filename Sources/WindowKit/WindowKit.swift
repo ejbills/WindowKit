@@ -269,14 +269,14 @@ public final class WindowKit {
 
                 case .applicationLaunched(let app):
                     self.tracker.repository.registerPID(app.processIdentifier)
-                    self.trackedApplications = self.tracker.repository.trackedApplications()
+                    self.refreshTrackedApplicationsFromRepository()
                     self.badgeStore.invalidateCache()
                     self.refreshBadge(forPID: app.processIdentifier)
 
                 case .applicationTerminated(let pid):
                     self.cancelLaunchTimeout(for: pid)
                     self.launchingApplications.removeAll { $0.processIdentifier == pid }
-                    self.trackedApplications.removeAll { $0.processIdentifier == pid }
+                    self.removeTrackedApplication(pid: pid)
                     self.badgeStore.removeBadge(forPID: pid)
                     self.badgeStore.invalidateCache()
                     self.appStates[pid]?.invalidateBadge()
@@ -308,10 +308,10 @@ public final class WindowKit {
                 case .windowAppeared(let window):
                     self.cancelLaunchTimeout(for: window.ownerPID)
                     self.launchingApplications.removeAll { $0.processIdentifier == window.ownerPID }
-                    self.trackedApplications = self.tracker.repository.trackedApplications()
+                    self.refreshTrackedApplicationsFromRepository()
                     self.invalidateAppState(forPID: window.ownerPID)
                 case .windowDisappeared(let id):
-                    self.trackedApplications = self.tracker.repository.trackedApplications()
+                    self.refreshTrackedApplicationsFromRepository()
                     self.invalidateAppState(forWindowID: id)
                 case .windowChanged(let window):
                     self.invalidateAppState(forPID: window.ownerPID)
@@ -326,6 +326,23 @@ public final class WindowKit {
                 }
             }
             .store(in: &cancellables)
+    }
+
+    private func refreshTrackedApplicationsFromRepository() {
+        let applications = tracker.repository.trackedApplications()
+            .map { (app: $0, pid: $0.processIdentifier) }
+            .sorted { $0.pid < $1.pid }
+
+        let pids = applications.map(\.pid)
+        let currentPIDs = trackedApplications.map(\.processIdentifier)
+        guard pids != currentPIDs else { return }
+
+        trackedApplications = applications.map(\.app)
+    }
+
+    private func removeTrackedApplication(pid: pid_t) {
+        guard trackedApplications.contains(where: { $0.processIdentifier == pid }) else { return }
+        trackedApplications.removeAll { $0.processIdentifier == pid }
     }
 
     private func scheduleLaunchTimeout(for pid: pid_t) {
