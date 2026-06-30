@@ -67,13 +67,7 @@ public final class SystemPermissions: ObservableObject, @unchecked Sendable {
             Logger.debug("requestScreenRecording skipped — headless mode is active")
             return
         }
-        _ = CGDisplayStream(
-            dispatchQueueDisplay: CGMainDisplayID(),
-            outputWidth: 1, outputHeight: 1,
-            pixelFormat: Int32(kCVPixelFormatType_32BGRA),
-            properties: nil, queue: .main,
-            handler: { _, _, _, _ in }
-        )
+        _ = CGRequestScreenCaptureAccess()
         openPrivacySettings(for: .screenRecording)
     }
 

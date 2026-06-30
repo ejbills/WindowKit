@@ -217,6 +217,27 @@ public final class WindowKit {
     public private(set) var trackedApplications: [NSRunningApplication] = []
     public private(set) var launchingApplications: [NSRunningApplication] = []
 
+    /// Every minimized window the native macOS Dock parks near Trash, sourced by
+    /// observing the Dock's accessibility tree (correct even when the native Dock is
+    /// hidden). Each entry carries its owner pid and a window-preview thumbnail, so
+    /// consumers can filter (e.g. drop windows whose app already has a dock icon).
+    /// Continuously maintained while tracking is active and
+    /// `tracksOrphanedMinimizedWindows` is enabled. Observable for SwiftUI.
+    public private(set) var orphanedMinimizedWindows: [DockMinimizedWindow] = []
+
+    /// Opt-in toggle for the minimized-dock-window subsystem (default `true`).
+    /// Cheap when idle — a single Dock accessibility poll on a background queue.
+    public var tracksOrphanedMinimizedWindows: Bool = true {
+        didSet {
+            guard oldValue != tracksOrphanedMinimizedWindows, isTrackingActive else { return }
+            if tracksOrphanedMinimizedWindows {
+                orphanedWindowTracker.start()
+            } else {
+                orphanedWindowTracker.stop()
+            }
+        }
+    }
+
     public var permissionStatus: PermissionState {
         SystemPermissions.shared.currentState
     }
@@ -244,6 +265,8 @@ public final class WindowKit {
     private static let badgePollInterval: TimeInterval = 5
 
     private let tracker: WindowTracker
+    private let orphanedWindowTracker = OrphanedWindowTracker()
+    private var isTrackingActive = false
     private let badgeStore = DockBadgeStore()
     private var cancellables = Set<AnyCancellable>()
     @ObservationIgnored private var appStates: [pid_t: AppWindowState] = [:]
@@ -324,6 +347,13 @@ public final class WindowKit {
                 case .wakeRecoveryCompleted:
                     self.resumeBadgePollingAfterWake()
                 }
+            }
+            .store(in: &cancellables)
+
+        orphanedWindowTracker.windowsPublisher
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] windows in
+                self?.orphanedMinimizedWindows = windows
             }
             .store(in: &cancellables)
     }
@@ -482,12 +512,31 @@ public final class WindowKit {
     }
 
     public func beginTracking() {
+        isTrackingActive = true
         tracker.startTracking()
+        if tracksOrphanedMinimizedWindows {
+            orphanedWindowTracker.start()
+        }
     }
 
     public func endTracking() {
+        isTrackingActive = false
         stopBadgePolling()
+        orphanedWindowTracker.stop()
         tracker.stopTracking()
+    }
+
+    /// Forces an immediate rebuild of the minimized-dock-window set, bypassing the
+    /// poll's change short-circuit. No-op when the subsystem is not active.
+    public func refreshOrphanedMinimizedWindows() async {
+        orphanedWindowTracker.refreshNow()
+    }
+
+    /// Restores a minimized dock window by pressing its native Dock item
+    /// (`AXPress`) — mirroring a click on the native Dock. `id` is a
+    /// `DockMinimizedWindow.id`. No-op if the window is no longer minimized.
+    public func restoreOrphanedMinimizedWindow(id: String) {
+        orphanedWindowTracker.restore(id: id)
     }
 
     /// Starts a 5-second polling timer for dock badge state.
@@ -535,14 +584,14 @@ public final class WindowKit {
         let badgeLookups = Array(badgeStates.keys)
         let bundleIdentifiers = badgeLookups.compactMap(\.bundleIdentifier)
         let bundleURLs = badgeLookups.compactMap(\.bundleURL)
-        badgeQueue.async { [badgeStore = self.badgeStore] in
+        badgeQueue.async { [badgeStore = self.badgeStore, weak self] in
             badgeStore.invalidateCache()
             let changed = badgeStore.refreshAll(
                 pids: pids,
                 bundleIdentifiers: bundleIdentifiers,
                 bundleURLs: bundleURLs
             )
-            Task { @MainActor [weak self] in
+            Task { @MainActor in
                 guard let self else { return }
                 guard self.badgeTrackingEnabled else { return }
                 for pid in changed.pids {

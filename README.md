@@ -185,6 +185,31 @@ let exactBadge = WindowKit.shared.badgeState(forBundleURL: appBundleURL)
 
 Bundle-identifier badge state reads the app's Dock item directly, so it can update while the app is not running. If multiple Dock items share the same bundle identifier, WindowKit only reports a bundle-id badge when those Dock items agree on the same badge value; use the bundle-URL API when you need a specific Dock item.
 
+### Minimized Dock Windows (incl. App-less)
+
+The per-app tracking pipeline only follows `.regular` apps, so minimized windows owned by menu-bar / agent / LSUIElement processes never appear in `trackedApplications` or `windowState(for:)`. The native macOS Dock, however, parks *every* minimized window near Trash — including these "app-less" ones.
+
+This channel surfaces exactly what the native Dock shows by observing the Dock process's accessibility tree (`AXMinimizedWindowDockItem` items). It is driven by Dock AX notifications (`AXCreated` / `AXUIElementDestroyed`) — no polling — and is a single authoritative source: it covers app-less windows, stays correct even when the native Dock is hidden, and needs no per-process window walking. Each entry is correlated to a CGWindowID and carries a WindowServer-captured **preview thumbnail** (which works even though the window is minimized). Restoring a window presses its Dock item (`AXPress`) — exactly what clicking the native Dock does.
+
+| Member | Type | Description |
+|---|---|---|
+| `orphanedMinimizedWindows` | `[DockMinimizedWindow]` | Observable, continuously-maintained set of the Dock's minimized windows. Each has `id`, optional `windowID`, `title`, and a `preview: CGImage?` thumbnail. |
+| `tracksOrphanedMinimizedWindows` | `Bool` | Opt-in toggle (default `true`). Flipping it live starts/stops the subsystem; it polls one process on a background queue, so it is cheap. |
+| `refreshOrphanedMinimizedWindows()` | `async` | Forces an immediate rebuild on the next poll tick. No-op when not tracking. |
+| `restoreOrphanedMinimizedWindow(id:)` | `(String)` | Restores a window by pressing its native Dock item. `id` is a `DockMinimizedWindow.id`. |
+
+```swift
+WindowKit.shared.beginTracking()   // starts this channel too (when enabled)
+
+// Observe in SwiftUI — re-renders when the set changes.
+ForEach(WindowKit.shared.orphanedMinimizedWindows) { window in
+    MinimizedWindowChip(title: window.title, preview: window.preview)
+        .onTapGesture { WindowKit.shared.restoreOrphanedMinimizedWindow(id: window.id) }
+}
+```
+
+Requires Accessibility permission and is started/stopped alongside `beginTracking()` / `endTracking()`.
+
 ### Events
 
 Subscribe to window lifecycle changes via Combine:
