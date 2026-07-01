@@ -210,6 +210,39 @@ ForEach(WindowKit.shared.orphanedMinimizedWindows) { window in
 
 Requires Accessibility permission and is started/stopped alongside `beginTracking()` / `endTracking()`.
 
+### Cmd+Tab Switcher Selection
+
+WindowKit can report which item is highlighted in the macOS **system Cmd+Tab switcher**. This is *pure observation* of the Dock process's accessibility tree (the `AXProcessSwitcherList` element) — WindowKit does **not** install an event tap or intercept the keypress, so Cmd+Tab keeps behaving 100% natively. It's driven by Dock AX notifications (`AXCreated` / `AXSelectedChildrenChanged` / `AXUIElementDestroyed`), not polling.
+
+| Member | Type | Description |
+|---|---|---|
+| `processSwitcherSelection` | `AppSwitcherSelection?` | Observable current selection, or `nil` when the switcher is closed. Carries `ownerPID`, `bundleIdentifier`, `title`, and `frame` (the highlighted item's rect, in AX/Quartz top-left coordinates). |
+| `processSwitcherEvents` | `AnyPublisher<AppSwitcherEvent, Never>` | Combine stream of `.appeared` / `.selectionChanged` / `.dismissed`. |
+| `tracksProcessSwitcher` | `Bool` | Opt-in toggle (default `true`). Flipping it live starts/stops the subsystem. |
+
+```swift
+WindowKit.shared.beginTracking()   // starts this channel too (when enabled)
+
+// Observe in SwiftUI — re-renders as the user tabs through apps.
+if let selection = WindowKit.shared.processSwitcherSelection {
+    Text(selection.title ?? "")            // highlighted app
+    // selection.ownerPID / selection.bundleIdentifier / selection.frame
+}
+
+// Or via Combine:
+WindowKit.shared.processSwitcherEvents
+    .sink { event in
+        switch event {
+        case .appeared(let sel):         // switcher opened
+        case .selectionChanged(let sel): // user tabbed to a different app
+        case .dismissed:                 // switcher closed
+        }
+    }
+    .store(in: &cancellables)
+```
+
+Requires Accessibility permission and is started/stopped alongside `beginTracking()` / `endTracking()`.
+
 ### Events
 
 Subscribe to window lifecycle changes via Combine:

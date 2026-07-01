@@ -238,6 +238,28 @@ public final class WindowKit {
         }
     }
 
+    /// The item currently highlighted in the macOS system Cmd+Tab switcher, or `nil` when
+    /// the switcher is closed. Pure observation of the Dock's accessibility tree — WindowKit
+    /// does not intercept the keypress. Observable for SwiftUI. See also `processSwitcherEvents`.
+    public private(set) var processSwitcherSelection: AppSwitcherSelection?
+
+    /// Stream of Cmd+Tab switcher lifecycle events (appeared / selection changed / dismissed).
+    public var processSwitcherEvents: AnyPublisher<AppSwitcherEvent, Never> {
+        appSwitcherObserver.eventPublisher
+    }
+
+    /// Opt-in toggle for Cmd+Tab switcher observation (default `true`).
+    public var tracksProcessSwitcher: Bool = true {
+        didSet {
+            guard oldValue != tracksProcessSwitcher, isTrackingActive else { return }
+            if tracksProcessSwitcher {
+                appSwitcherObserver.start()
+            } else {
+                appSwitcherObserver.stop()
+            }
+        }
+    }
+
     public var permissionStatus: PermissionState {
         SystemPermissions.shared.currentState
     }
@@ -266,6 +288,7 @@ public final class WindowKit {
 
     private let tracker: WindowTracker
     private let orphanedWindowTracker = OrphanedWindowTracker()
+    private let appSwitcherObserver = AppSwitcherObserver()
     private var isTrackingActive = false
     private let badgeStore = DockBadgeStore()
     private var cancellables = Set<AnyCancellable>()
@@ -354,6 +377,13 @@ public final class WindowKit {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] windows in
                 self?.orphanedMinimizedWindows = windows
+            }
+            .store(in: &cancellables)
+
+        appSwitcherObserver.selectionPublisher
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] selection in
+                self?.processSwitcherSelection = selection
             }
             .store(in: &cancellables)
     }
@@ -517,12 +547,16 @@ public final class WindowKit {
         if tracksOrphanedMinimizedWindows {
             orphanedWindowTracker.start()
         }
+        if tracksProcessSwitcher {
+            appSwitcherObserver.start()
+        }
     }
 
     public func endTracking() {
         isTrackingActive = false
         stopBadgePolling()
         orphanedWindowTracker.stop()
+        appSwitcherObserver.stop()
         tracker.stopTracking()
     }
 
