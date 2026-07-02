@@ -224,7 +224,7 @@ extension CapturedWindow {
             return CGDisplayBounds(owningDisplayID)
         }
         return NSScreen.screens
-            .compactMap { $0.directDisplayID.map(CGDisplayBounds.init) }
+            .compactMap { screen in screen.directDisplayID.map { CGDisplayBounds($0) } }
             .filter { $0.intersects(bounds) }
             .max { intersectionArea(with: $0) < intersectionArea(with: $1) }
     }
