@@ -7,6 +7,18 @@ public struct ManagedDisplay: Identifiable, Hashable, Sendable {
     public let displayIdentifier: String
     public let currentSpaceID: CGSSpaceID
     public let spaces: [ManagedSpace]
+
+    /// The NSScreen backing this managed display, matched by either the
+    /// CGDirectDisplayID string or the display UUID that SkyLight reports
+    /// as the display identifier.
+    public var screen: NSScreen? {
+        NSScreen.screens.first { screen in
+            if let directDisplayID = screen.directDisplayID, String(directDisplayID) == displayIdentifier {
+                return true
+            }
+            return screen.displayUUIDString == displayIdentifier
+        }
+    }
 }
 
 public struct ManagedSpace: Identifiable, Hashable, Sendable {
@@ -15,6 +27,13 @@ public struct ManagedSpace: Identifiable, Hashable, Sendable {
     public let uuid: String?
     public let type: Int
     public let isCurrent: Bool
+
+    /// A user Desktop space (CGS type 0) — the kind listed in Mission Control
+    /// and targetable by `WindowSpaces.move`.
+    public var isUserDesktop: Bool { type == 0 }
+
+    /// A space created for a fullscreen app (CGS type 4).
+    public var isFullscreen: Bool { type == 4 }
 }
 
 public enum WindowSpaceError: Error, LocalizedError, Sendable {
@@ -155,7 +174,7 @@ public enum WindowSpaces {
     }
 }
 
-private extension NSScreen {
+extension NSScreen {
     var directDisplayID: CGDirectDisplayID? {
         (deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)
             .map { CGDirectDisplayID($0.uint32Value) }
@@ -181,6 +200,58 @@ extension CapturedWindow {
 
     public func moveToCurrentManagedSpace() throws {
         try WindowSpaces.moveToCurrentManagedSpace(windowID: id)
+    }
+
+    /// Moves the window to the given managed space and, when the window sits
+    /// on a different display than `screen`, remaps its position
+    /// proportionally onto that screen's visible frame — the window keeps its
+    /// size and its relative placement, clamped so it stays reachable.
+    public func move(toManagedSpace spaceID: CGSSpaceID, remappingOnto screen: NSScreen) async throws {
+        try WindowSpaces.move(windowID: id, toManagedSpace: spaceID)
+
+        guard let displayID = screen.directDisplayID else { return }
+        let targetDisplayBounds = CGDisplayBounds(displayID)
+        guard !targetDisplayBounds.intersects(bounds) else { return }
+
+        let visible = ScreenCoordinates.axRect(fromAppKit: screen.visibleFrame)
+        try await setPosition(Self.remappedOrigin(for: bounds, from: sourceDisplayBounds(), into: visible))
+    }
+
+    /// Display bounds the window currently occupies, from its owning display
+    /// when known, otherwise the display it overlaps most.
+    private func sourceDisplayBounds() -> CGRect? {
+        if let owningDisplayID {
+            return CGDisplayBounds(owningDisplayID)
+        }
+        return NSScreen.screens
+            .compactMap { $0.directDisplayID.map(CGDisplayBounds.init) }
+            .filter { $0.intersects(bounds) }
+            .max { intersectionArea(with: $0) < intersectionArea(with: $1) }
+    }
+
+    private func intersectionArea(with rect: CGRect) -> CGFloat {
+        let intersection = rect.intersection(bounds)
+        if intersection.isNull || intersection.isEmpty {
+            return 0
+        }
+        return intersection.width * intersection.height
+    }
+
+    /// Maps a window's position proportionally from its source display into
+    /// the target display's visible area, clamped so the window stays reachable.
+    private static func remappedOrigin(for bounds: CGRect, from sourceBounds: CGRect?, into visible: CGRect) -> CGPoint {
+        var origin: CGPoint
+        if let source = sourceBounds, source.width > 0, source.height > 0 {
+            origin = CGPoint(
+                x: visible.minX + (bounds.minX - source.minX) / source.width * visible.width,
+                y: visible.minY + (bounds.minY - source.minY) / source.height * visible.height
+            )
+        } else {
+            origin = CGPoint(x: visible.midX - bounds.width / 2, y: visible.midY - bounds.height / 2)
+        }
+        origin.x = min(max(origin.x, visible.minX), max(visible.minX, visible.maxX - bounds.width))
+        origin.y = min(max(origin.y, visible.minY), max(visible.minY, visible.maxY - bounds.height))
+        return origin
     }
 }
 
