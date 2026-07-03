@@ -16,7 +16,16 @@ public final class ProcessWatcher {
     private var observations: [NSObjectProtocol] = []
     private var knownPIDs: Set<pid_t> = []
     private var runningAppsObservation: NSKeyValueObservation?
-    private var pendingPolicyObservations: [pid_t: NSKeyValueObservation] = [:]
+    private var pendingPolicyObservations: [pid_t: PolicyObservation] = [:]
+
+    private struct PolicyObservation {
+        let app: NSRunningApplication
+        let token: NSKeyValueObservation
+
+        func invalidate() {
+            token.invalidate()
+        }
+    }
 
     /// How long to watch a non-.regular process for a late activation-policy flip.
     /// Apps that spawn per-window child processes by exec'ing their own binary
@@ -101,12 +110,13 @@ public final class ProcessWatcher {
 
     private func observePolicyFlip(of app: NSRunningApplication) {
         let pid = app.processIdentifier
-        pendingPolicyObservations[pid] = app.observe(\.activationPolicy) { [weak self] app, _ in
+        let token = app.observe(\.activationPolicy) { [weak self] app, _ in
             DispatchQueue.main.async {
                 guard let self, app.activationPolicy == .regular, !app.isTerminated else { return }
                 self.markLaunched(app)
             }
         }
+        pendingPolicyObservations[pid] = PolicyObservation(app: app, token: token)
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.policyFlipTimeout) { [weak self] in
             self?.pendingPolicyObservations.removeValue(forKey: pid)?.invalidate()
         }
