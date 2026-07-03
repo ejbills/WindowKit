@@ -45,7 +45,11 @@ final class AppSwitcherObserver: @unchecked Sendable {
     // Touched only on `queue`.
     private var scanScheduled = false
     private var currentSelection: AppSwitcherSelection?
-    private var attachedList: AXUIElement?
+
+    /// Written by `scan()` on `queue`, read by `tearDownDockObserver()` on
+    /// main — an unsynchronized strong CF reference re-assigned cross-thread
+    /// can over-release. All access goes through this lock.
+    private let attachedList = OSAllocatedUnfairLock<AXUIElement?>(uncheckedState: nil)
 
     // Dock AX observer. Mutated on main (start/stop/re-register).
     private var observer: AXObserver?
@@ -75,7 +79,6 @@ final class AppSwitcherObserver: @unchecked Sendable {
         stopWorkspaceObservers()
         queue.async { [weak self] in
             guard let self else { return }
-            self.attachedList = nil
             self.currentSelection = nil
             self.scanScheduled = false
         }
@@ -112,8 +115,11 @@ final class AppSwitcherObserver: @unchecked Sendable {
             for notification in [kAXCreatedNotification, kAXUIElementDestroyedNotification] {
                 AXObserverRemoveNotification(observer, dockApp, notification as CFString)
             }
-            if let attachedList {
-                detachListNotifications(observer: observer, list: attachedList)
+            if let list = attachedList.withLockUnchecked({ list -> AXUIElement? in
+                defer { list = nil }
+                return list
+            }) {
+                detachListNotifications(observer: observer, list: list)
             }
         }
         self.observer = nil
@@ -194,9 +200,11 @@ final class AppSwitcherObserver: @unchecked Sendable {
 
         // Switcher closed.
         guard let list else {
-            if let attachedList {
-                detachListNotifications(attachedList)
-                self.attachedList = nil
+            if let attached = attachedList.withLockUnchecked({ list -> AXUIElement? in
+                defer { list = nil }
+                return list
+            }) {
+                detachListNotifications(attached)
             }
             if currentSelection != nil {
                 currentSelection = nil
@@ -207,8 +215,12 @@ final class AppSwitcherObserver: @unchecked Sendable {
         }
 
         // Switcher open — attach to its selection changes once.
-        if attachedList == nil {
-            attachedList = list
+        let didAttach = attachedList.withLockUnchecked { current -> Bool in
+            guard current == nil else { return false }
+            current = list
+            return true
+        }
+        if didAttach {
             attachListNotifications(list)
         }
 
