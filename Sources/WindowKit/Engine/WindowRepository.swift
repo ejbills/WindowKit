@@ -36,6 +36,13 @@ public final class WindowRepository: @unchecked Sendable {
         }
     }
 
+    /// PIDs that currently have at least one cached window.
+    public func windowedPIDs() -> Set<pid_t> {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return Set(entries.compactMap { $1.isEmpty ? nil : $0 })
+    }
+
     public func readCache(forPID pid: pid_t) -> [CapturedWindow] {
         cacheLock.lock()
         defer { cacheLock.unlock() }

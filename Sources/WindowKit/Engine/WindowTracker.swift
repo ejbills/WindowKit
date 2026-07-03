@@ -42,6 +42,16 @@ public final class WindowTracker {
     private static let wakeMaxDelay: Duration = .seconds(15)
     private static let wakeBackoffMultiplier: Double = 2.0
 
+    // AX watcher retry backoff (1s, 2s, 4s, 8s, 16s)
+    private static let watchRetryInitialDelay: TimeInterval = 1.0
+    private static let watchRetryMaxAttempts = 5
+    private let watchRetryAttempts = OSAllocatedUnfairLock(initialState: [pid_t: Int]())
+
+    // Rediscovery for late first windows: apps like Bambu Studio spawn a .regular
+    // process whose first window can take 10+ seconds to materialize, long after
+    // the single post-launch discovery ran.
+    private static let lateWindowRescanDelays: [TimeInterval] = [3.0, 8.0]
+
     // Destroy burst tapering — escalating debounce per PID
     private static let destroyMinInterval: Duration = .milliseconds(50)
     private static let destroyMaxInterval: Duration = .milliseconds(800)
@@ -130,6 +140,7 @@ public final class WindowTracker {
 
         pendingOperations.withLockUnchecked { $0.removeAll() }
         destroyBurstState.withLockUnchecked { $0.removeAll() }
+        watchRetryAttempts.withLockUnchecked { $0.removeAll() }
     }
 
     @discardableResult
@@ -271,10 +282,15 @@ public final class WindowTracker {
             repository.registerPID(app.processIdentifier)
             ensureWatching(pid: app.processIdentifier, reason: "applicationLaunched")
             debounce(key: "refresh-\(app.processIdentifier)") { [weak self] in
-                _ = await self?.trackApplication(app)
+                guard let self else { return }
+                let windows = await self.trackApplication(app)
+                if windows.isEmpty {
+                    self.scheduleLateWindowRescans(for: app)
+                }
             }
 
         case .applicationTerminated(let pid):
+            watchRetryAttempts.withLockUnchecked { _ = $0.removeValue(forKey: pid) }
             watcherManager?.unwatch(pid: pid)
             destroyBurstState.withLockUnchecked { _ = $0.removeValue(forKey: pid) }
             let windows = repository.readCache(forPID: pid)
@@ -301,6 +317,24 @@ public final class WindowTracker {
         }
     }
 
+    /// One post-launch discovery is not enough for apps whose first window shows
+    /// up seconds later; retry a couple of times, stopping at the first success.
+    private func scheduleLateWindowRescans(for app: NSRunningApplication, delayIndex: Int = 0) {
+        guard delayIndex < Self.lateWindowRescanDelays.count else { return }
+        let pid = app.processIdentifier
+        axQueue.asyncAfter(deadline: .now() + Self.lateWindowRescanDelays[delayIndex]) { [weak self] in
+            guard let self, self.isTracking, !app.isTerminated else { return }
+            guard self.repository.readCache(forPID: pid).isEmpty else { return }
+            Task { [weak self] in
+                guard let self else { return }
+                let windows = await self.trackApplication(app)
+                if windows.isEmpty {
+                    self.scheduleLateWindowRescans(for: app, delayIndex: delayIndex + 1)
+                }
+            }
+        }
+    }
+
     private var isInWakeCooldown: Bool {
         if let wakeCooldownUntil, ContinuousClock.now < wakeCooldownUntil {
             return true
@@ -311,11 +345,55 @@ public final class WindowTracker {
     private func ensureWatching(pid: pid_t, reason: String) {
         guard let watcherManager else { return }
         if watcherManager.isWatching(pid: pid) {
+            watchRetryAttempts.withLockUnchecked { _ = $0.removeValue(forKey: pid) }
             return
         }
 
-        if !watcherManager.watch(pid: pid) {
+        if watcherManager.watch(pid: pid) {
+            watchRetryAttempts.withLockUnchecked { _ = $0.removeValue(forKey: pid) }
+        } else {
             Logger.debug("AX watcher setup deferred", details: "pid=\(pid), reason=\(reason)")
+            scheduleWatchRetry(pid: pid)
+        }
+    }
+
+    /// Freshly spawned processes (e.g. per-window child instances Bambu Studio
+    /// execs from its own bundle) are often not AX-ready when first seen, and a
+    /// failed watch used to be permanent — no watcher meant no windowCreated
+    /// events, so windows that appeared seconds later were never discovered.
+    /// Retry with backoff and rediscover once the watcher finally attaches.
+    private func scheduleWatchRetry(pid: pid_t) {
+        let attempt = watchRetryAttempts.withLockUnchecked { attempts -> Int? in
+            let next = (attempts[pid] ?? 0) + 1
+            guard next <= Self.watchRetryMaxAttempts else { return nil }
+            attempts[pid] = next
+            return next
+        }
+        guard let attempt else {
+            Logger.warning("AX watcher setup abandoned after \(Self.watchRetryMaxAttempts) attempts", details: "pid=\(pid)")
+            return
+        }
+
+        let delay = Self.watchRetryInitialDelay * pow(2.0, Double(attempt - 1))
+        axQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, self.isTracking, let watcherManager = self.watcherManager else { return }
+            guard let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated else {
+                self.watchRetryAttempts.withLockUnchecked { _ = $0.removeValue(forKey: pid) }
+                return
+            }
+            if watcherManager.isWatching(pid: pid) {
+                self.watchRetryAttempts.withLockUnchecked { _ = $0.removeValue(forKey: pid) }
+                return
+            }
+            if watcherManager.watch(pid: pid) {
+                Logger.info("AX watcher attached on retry", details: "pid=\(pid), attempt=\(attempt)")
+                self.watchRetryAttempts.withLockUnchecked { _ = $0.removeValue(forKey: pid) }
+                self.debounce(key: "refresh-\(pid)") { [weak self] in
+                    _ = await self?.trackApplication(app)
+                }
+            } else {
+                self.scheduleWatchRetry(pid: pid)
+            }
         }
     }
 

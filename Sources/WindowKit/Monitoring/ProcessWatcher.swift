@@ -14,10 +14,16 @@ public final class ProcessWatcher {
     public let events: AnyPublisher<ProcessEvent, Never>
     private let eventSubject = PassthroughSubject<ProcessEvent, Never>()
     private var observations: [NSObjectProtocol] = []
-    private var runLoopObserver: CFRunLoopObserver?
-    private var lastReconcileTime: CFAbsoluteTime = 0
-    private var lastSeenCount = 0
     private var knownPIDs: Set<pid_t> = []
+    private var runningAppsObservation: NSKeyValueObservation?
+    private var pendingPolicyObservations: [pid_t: NSKeyValueObservation] = [:]
+
+    /// How long to watch a non-.regular process for a late activation-policy flip.
+    /// Apps that spawn per-window child processes by exec'ing their own binary
+    /// (Bambu Studio, Parallels winapps) appear in runningApplications immediately
+    /// but only become .regular once they connect to the window server — sometimes
+    /// many seconds later, and without any NSWorkspace launch notification.
+    private static let policyFlipTimeout: TimeInterval = 120
 
     public private(set) var frontmostApplication: NSRunningApplication?
 
@@ -38,31 +44,71 @@ public final class ProcessWatcher {
         let center = NSWorkspace.shared.notificationCenter
         observations.forEach { center.removeObserver($0) }
         observations.removeAll()
-        if let observer = runLoopObserver {
-            CFRunLoopRemoveObserver(CFRunLoopGetMain(), observer, .commonModes)
-            runLoopObserver = nil
-        }
+        runningAppsObservation?.invalidate()
+        runningAppsObservation = nil
+        pendingPolicyObservations.values.forEach { $0.invalidate() }
+        pendingPolicyObservations.removeAll()
     }
 
     public func runningApplications() -> [NSRunningApplication] {
         NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }
     }
 
-    private func diffRunningApps() {
-        let current = runningApplications()
+    /// Event-driven backstop for apps the NSWorkspace notifications miss.
+    /// Processes spawned by exec'ing an app binary directly (Bambu Studio project
+    /// windows, Parallels Coherence winapps) never fire
+    /// didLaunch/didTerminateApplicationNotification. Membership changes surface
+    /// through KVO on runningApplications; a process that joins the list before it
+    /// is .regular gets a per-app activationPolicy observation until it flips.
+    private func reconcileRunningApps() {
+        let current = NSWorkspace.shared.runningApplications
         let currentPIDs = Set(current.map(\.processIdentifier))
 
-        let appeared = currentPIDs.subtracting(knownPIDs)
-        let disappeared = knownPIDs.subtracting(currentPIDs)
-        guard !appeared.isEmpty || !disappeared.isEmpty else { return }
-
-        knownPIDs = currentPIDs
-
-        for app in current where appeared.contains(app.processIdentifier) {
-            eventSubject.send(.applicationLaunched(app))
+        for app in current {
+            let pid = app.processIdentifier
+            guard !knownPIDs.contains(pid) else { continue }
+            if app.activationPolicy == .regular {
+                markLaunched(app)
+            } else if pendingPolicyObservations[pid] == nil {
+                observePolicyFlip(of: app)
+            }
         }
-        for pid in disappeared {
+
+        for pid in knownPIDs.subtracting(currentPIDs) {
+            knownPIDs.remove(pid)
             eventSubject.send(.applicationTerminated(pid))
+        }
+        for pid in Set(pendingPolicyObservations.keys).subtracting(currentPIDs) {
+            pendingPolicyObservations.removeValue(forKey: pid)?.invalidate()
+        }
+    }
+
+    private func markLaunched(_ app: NSRunningApplication) {
+        let pid = app.processIdentifier
+        pendingPolicyObservations.removeValue(forKey: pid)?.invalidate()
+        guard !knownPIDs.contains(pid) else { return }
+        knownPIDs.insert(pid)
+        // Back-door launches never fire willLaunchApplicationNotification, so a
+        // still-starting app gets its launching state here — consumers dedupe by
+        // PID against the notification-driven event. This is the earliest point a
+        // back-door process is provably an app (vs. a background helper), and its
+        // first window can still be seconds away.
+        if !app.isFinishedLaunching {
+            eventSubject.send(.applicationWillLaunch(app))
+        }
+        eventSubject.send(.applicationLaunched(app))
+    }
+
+    private func observePolicyFlip(of app: NSRunningApplication) {
+        let pid = app.processIdentifier
+        pendingPolicyObservations[pid] = app.observe(\.activationPolicy) { [weak self] app, _ in
+            DispatchQueue.main.async {
+                guard let self, app.activationPolicy == .regular, !app.isTerminated else { return }
+                self.markLaunched(app)
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.policyFlipTimeout) { [weak self] in
+            self?.pendingPolicyObservations.removeValue(forKey: pid)?.invalidate()
         }
     }
 
@@ -83,16 +129,18 @@ public final class ProcessWatcher {
         ) { [weak self] notification in
             guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
                   app.activationPolicy == .regular else { return }
-            self?.knownPIDs.insert(app.processIdentifier)
-            self?.eventSubject.send(.applicationLaunched(app))
+            self?.markLaunched(app)
         })
 
         observations.append(center.addObserver(
             forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main
         ) { [weak self] notification in
-            guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
-            self?.knownPIDs.remove(app.processIdentifier)
-            self?.eventSubject.send(.applicationTerminated(app.processIdentifier))
+            guard let self,
+                  let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+            let pid = app.processIdentifier
+            pendingPolicyObservations.removeValue(forKey: pid)?.invalidate()
+            knownPIDs.remove(pid)
+            eventSubject.send(.applicationTerminated(pid))
         })
 
         observations.append(center.addObserver(
@@ -119,19 +167,10 @@ public final class ProcessWatcher {
             self?.eventSubject.send(.spaceChanged)
         })
 
-        lastSeenCount = NSWorkspace.shared.runningApplications.count
-        lastReconcileTime = CFAbsoluteTimeGetCurrent()
-        let observer = CFRunLoopObserverCreateWithHandler(nil, CFRunLoopActivity.beforeWaiting.rawValue, true, 0) { [weak self] _, _ in
-            guard let self else { return }
-            let now = CFAbsoluteTimeGetCurrent()
-            guard now - self.lastReconcileTime >= 1.0 else { return }
-            self.lastReconcileTime = now
-            let count = NSWorkspace.shared.runningApplications.count
-            guard count != self.lastSeenCount else { return }
-            self.lastSeenCount = count
-            self.diffRunningApps()
+        // Membership-only at setup (knownPIDs is seeded above): attaching policy
+        // observations to every pre-existing background process would be waste.
+        runningAppsObservation = NSWorkspace.shared.observe(\.runningApplications) { [weak self] _, _ in
+            DispatchQueue.main.async { self?.reconcileRunningApps() }
         }
-        CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .commonModes)
-        runLoopObserver = observer
     }
 }

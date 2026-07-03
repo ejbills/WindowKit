@@ -217,6 +217,14 @@ public final class WindowKit {
     public private(set) var trackedApplications: [NSRunningApplication] = []
     public private(set) var launchingApplications: [NSRunningApplication] = []
 
+    /// PIDs of tracked apps that currently have at least one cached window.
+    /// Companion to `trackedApplications` for consumers whose membership logic
+    /// depends on window presence: identity diffing alone misses an app that was
+    /// tracked before its first window appeared (multi-process apps open project
+    /// windows seconds after their process registers). Mutated only when the set
+    /// actually changes, so observation fires exactly on presence flips.
+    public private(set) var windowedApplicationPIDs: Set<pid_t> = []
+
     /// Every minimized window the native macOS Dock parks near Trash, sourced by
     /// observing the Dock's accessibility tree (correct even when the native Dock is
     /// hidden). Each entry carries its owner pid and a window-preview thumbnail, so
@@ -310,8 +318,10 @@ public final class WindowKit {
                 guard let self else { return }
                 switch event {
                 case .applicationWillLaunch(let app):
+                    let pid = app.processIdentifier
+                    guard !self.launchingApplications.contains(where: { $0.processIdentifier == pid }) else { break }
                     self.launchingApplications.append(app)
-                    self.scheduleLaunchTimeout(for: app.processIdentifier)
+                    self.scheduleLaunchTimeout(for: pid)
 
                 case .applicationLaunched(let app):
                     self.tracker.repository.registerPID(app.processIdentifier)
@@ -323,6 +333,7 @@ public final class WindowKit {
                     self.cancelLaunchTimeout(for: pid)
                     self.launchingApplications.removeAll { $0.processIdentifier == pid }
                     self.removeTrackedApplication(pid: pid)
+                    self.refreshWindowedApplicationPIDs()
                     self.badgeStore.removeBadge(forPID: pid)
                     self.badgeStore.invalidateCache()
                     self.appStates[pid]?.invalidateBadge()
@@ -355,9 +366,11 @@ public final class WindowKit {
                     self.cancelLaunchTimeout(for: window.ownerPID)
                     self.launchingApplications.removeAll { $0.processIdentifier == window.ownerPID }
                     self.refreshTrackedApplicationsFromRepository()
+                    self.refreshWindowedApplicationPIDs()
                     self.invalidateAppState(forPID: window.ownerPID)
                 case .windowDisappeared(let id):
                     self.refreshTrackedApplicationsFromRepository()
+                    self.refreshWindowedApplicationPIDs()
                     self.invalidateAppState(forWindowID: id)
                 case .windowChanged(let window):
                     self.invalidateAppState(forPID: window.ownerPID)
@@ -386,6 +399,12 @@ public final class WindowKit {
                 self?.processSwitcherSelection = selection
             }
             .store(in: &cancellables)
+    }
+
+    private func refreshWindowedApplicationPIDs() {
+        let pids = tracker.repository.windowedPIDs()
+        guard pids != windowedApplicationPIDs else { return }
+        windowedApplicationPIDs = pids
     }
 
     private func refreshTrackedApplicationsFromRepository() {
@@ -535,6 +554,14 @@ public final class WindowKit {
 
     public func refresh(application: NSRunningApplication) async {
         await tracker.refreshApplication(application)
+    }
+
+    /// Refreshes stale previews for the app's cached windows without a full AX
+    /// rediscovery. Cheap enough to call per sibling process of a multi-instance
+    /// bundle (one process per document window), whose caches are already kept
+    /// current by AX events.
+    public func refreshPreviews(application: NSRunningApplication) async {
+        _ = await tracker.cachedWindowsRefreshingPreviews(for: application.processIdentifier)
     }
 
     public func refreshAll() async {
