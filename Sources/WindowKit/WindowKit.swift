@@ -256,6 +256,17 @@ public final class WindowKit {
         appSwitcherObserver.eventPublisher
     }
 
+    /// Nudges the Cmd+Tab observer to look for the switcher now. Call when the host app
+    /// detects a ⌘-Tab keydown: some systems' Dock never delivers the app-level AX
+    /// creation notifications that normally trigger discovery (seen on macOS 26.5), so
+    /// without this nudge the switcher is never found there. Briefly rescans until the
+    /// switcher list appears, then its element-level notifications take over. No-op when
+    /// switcher tracking is disabled or inactive.
+    public func probeProcessSwitcher() {
+        guard tracksProcessSwitcher else { return }
+        appSwitcherObserver.probe()
+    }
+
     /// Opt-in toggle for Cmd+Tab switcher observation (default `true`).
     public var tracksProcessSwitcher: Bool = true {
         didSet {

@@ -42,9 +42,13 @@ final class AppSwitcherObserver: @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.windowkit.appSwitcher", qos: .userInitiated)
     private let isActive = OSAllocatedUnfairLock(initialState: false)
 
+    private static let probeInterval: TimeInterval = 0.1
+    private static let probeTickLimit = 20
+
     // Touched only on `queue`.
     private var scanScheduled = false
     private var currentSelection: AppSwitcherSelection?
+    private var probeTicksRemaining = 0
 
     /// Written by `scan()` on `queue`, read by `tearDownDockObserver()` on
     /// main — an unsynchronized strong CF reference re-assigned cross-thread
@@ -81,8 +85,36 @@ final class AppSwitcherObserver: @unchecked Sendable {
             guard let self else { return }
             self.currentSelection = nil
             self.scanScheduled = false
+            self.probeTicksRemaining = 0
         }
         if selectionSubject.value != nil { selectionSubject.send(nil) }
+    }
+
+    // MARK: Discovery probe
+
+    func probe() {
+        queue.async { [weak self] in
+            guard let self, self.isActive.withLock({ $0 }) else { return }
+            let alreadyProbing = self.probeTicksRemaining > 0
+            self.probeTicksRemaining = Self.probeTickLimit
+            if !alreadyProbing {
+                self.probeTick()
+            }
+        }
+    }
+
+    /// Runs on `queue` only.
+    private func probeTick() {
+        guard isActive.withLock({ $0 }), probeTicksRemaining > 0 else { return }
+        probeTicksRemaining -= 1
+        scan()
+        guard attachedList.withLockUnchecked({ $0 == nil }) else {
+            probeTicksRemaining = 0
+            return
+        }
+        queue.asyncAfter(deadline: .now() + Self.probeInterval) { [weak self] in
+            self?.probeTick()
+        }
     }
 
     // MARK: Dock observer (main)
