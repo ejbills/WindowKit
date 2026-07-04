@@ -14,16 +14,25 @@ public struct WindowEnumerator {
         cgWindowDescriptors(forPID: pid)
     }
 
+    public struct ResolvedWindowID {
+        public let windowID: CGWindowID
+        /// True when `_AXUIElementGetWindow` supplied the ID directly (a live AX
+        /// window), false when heuristics matched the element to a CG list entry
+        /// by title/geometry — the only path a zombie CG entry can enter through.
+        public let isAuthoritative: Bool
+    }
+
     public func resolveWindowID(
         _ element: AXUIElement,
         candidates: [CGWindowDescriptor],
         excludedIDs: Set<CGWindowID> = []
-    ) -> CGWindowID? {
+    ) -> ResolvedWindowID? {
         if let windowID = axElementWindowID(element), windowID != 0 {
-            return windowID
+            return ResolvedWindowID(windowID: windowID, isAuthoritative: true)
         }
 
         return matchByHeuristics(element: element, candidates: candidates, excludedIDs: excludedIDs)
+            .map { ResolvedWindowID(windowID: $0, isAuthoritative: false) }
     }
 
     private func matchByHeuristics(
@@ -123,6 +132,7 @@ public struct WindowEnumerator {
     public func shouldAcceptWindow(
         element: AXUIElement,
         windowID: CGWindowID,
+        hasAuthoritativeWindowID: Bool,
         descriptor: CGWindowDescriptor,
         app: NSRunningApplication,
         activeSpaces: Set<Int>,
@@ -150,12 +160,20 @@ public struct WindowEnumerator {
             return true
         }
 
-        if !windowSpaces.isEmpty && windowSpaces.isDisjoint(with: activeSpaces) {
-            if !isOnScreen && !isMinimized && !isFullscreen && !app.isHidden {
-                Logger.debug("Rejecting ghost window with stale space ID", details: "id=\(windowID), app=\(app.localizedName ?? "?")")
-                return false
-            }
+        // Off-screen, unminimized, app visible: either a real window on another
+        // Space or a zombie CG entry. CGS space bookkeeping cannot make that
+        // call — it reports stale or empty space lists for other-Space windows
+        // after login or a Dock restart, and rejecting on it dropped legitimate
+        // windows until their app was next focused (cold-start discovery loss on
+        // multi-Space setups). A live AX window is a real window; only
+        // heuristic-matched entries stay subject to the space checks below.
+        if hasAuthoritativeWindowID {
             return true
+        }
+
+        if !windowSpaces.isEmpty && windowSpaces.isDisjoint(with: activeSpaces) {
+            Logger.debug("Rejecting ghost window with stale space ID", details: "id=\(windowID), app=\(app.localizedName ?? "?")")
+            return false
         }
 
         if (try? element.isMainWindow()) == true {

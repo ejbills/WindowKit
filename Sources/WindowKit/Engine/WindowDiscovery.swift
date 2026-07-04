@@ -252,9 +252,10 @@ struct WindowDiscovery {
             for axWindow in axWindows {
                 guard self.enumerator.meetsDiscoveryCriteria(axWindow) else { continue }
 
-                guard let windowID = self.enumerator.resolveWindowID(axWindow, candidates: cgCandidates, excludedIDs: usedIDs) else {
+                guard let resolved = self.enumerator.resolveWindowID(axWindow, candidates: cgCandidates, excludedIDs: usedIDs) else {
                     continue
                 }
+                let windowID = resolved.windowID
 
                 guard !excludeIDs.contains(windowID) else { continue }
 
@@ -266,6 +267,7 @@ struct WindowDiscovery {
                 guard self.enumerator.shouldAcceptWindow(
                     element: axWindow,
                     windowID: windowID,
+                    hasAuthoritativeWindowID: resolved.isAuthoritative,
                     descriptor: descriptor,
                     app: app,
                     activeSpaces: activeSpaces,
