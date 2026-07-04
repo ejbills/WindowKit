@@ -258,15 +258,28 @@ final class AppSwitcherObserver: @unchecked Sendable {
         guard isActive.withLock({ $0 }) else { return }
 
         // Reuse the attached element instead of re-walking the Dock tree each
-        // poll; a dead element (attribute read fails) means the session ended.
+        // poll. A dead element (read returns nil) means the session ended; a
+        // read that *throws* means the Dock isn't answering (hung/overloaded) —
+        // session state unknown, so keep it alive and let a later tick decide
+        // rather than falsely dismissing mid-session.
         var list = attachedList.withLockUnchecked { $0 }
-        if let cached = list, (try? cached.subrole()) != Self.switcherSubrole {
-            attachedList.withLockUnchecked { $0 = nil }
-            detachListNotifications(cached)
-            list = nil
+        if let cached = list {
+            do {
+                if try cached.subrole() != Self.switcherSubrole {
+                    attachedList.withLockUnchecked { $0 = nil }
+                    detachListNotifications(cached)
+                    list = nil
+                }
+            } catch {
+                return
+            }
         }
         if list == nil {
             list = findSwitcherList()
+            // Timeouts don't inherit from the app element; bound this element's
+            // reads too so a hung Dock fails fast (safe now that timeouts are
+            // "unknown", not "closed") instead of blocking the queue ~6s per read.
+            _ = list?.setMessagingTimeout(seconds: Self.messagingTimeout)
         }
 
         // Switcher closed.
