@@ -14,6 +14,7 @@ public final class WindowRepository: @unchecked Sendable {
 
     private var entries: [pid_t: Set<CapturedWindow>] = [:]
     private let cacheLock = NSLock()
+    private var lastPreviewPurge = Date.distantPast
 
     public var ignoredPIDs: Set<pid_t> = []
 
@@ -149,6 +150,7 @@ public final class WindowRepository: @unchecked Sendable {
         }
 
         entries[pid] = merged
+        purgeExpiredPreviewsIfDueLocked(now: now)
 
         Logger.debug("Store merge result", details: "pid=\(pid), old=\(oldWindows.count), discovered=\(windows.count), merged=\(merged.count)")
 
@@ -334,7 +336,13 @@ public final class WindowRepository: @unchecked Sendable {
     public func purgeExpiredPreviews() {
         cacheLock.lock()
         defer { cacheLock.unlock() }
-        let now = Date()
+        purgeExpiredPreviewsLocked(now: Date())
+    }
+
+    /// Drops expired preview bitmaps for real. Reads already treat expired
+    /// previews as absent, but the CGImages themselves stay retained until
+    /// this runs — a full-resolution capture per window, forever, without it.
+    private func purgeExpiredPreviewsLocked(now: Date) {
         for (pid, windowSet) in entries {
             var modified = false
             var updatedSet = windowSet
@@ -353,6 +361,14 @@ public final class WindowRepository: @unchecked Sendable {
                 entries[pid] = updatedSet
             }
         }
+    }
+
+    /// Opportunistic purge on the store path, rate-limited to one sweep per
+    /// cache-duration window so refresh bursts don't rescan every entry.
+    private func purgeExpiredPreviewsIfDueLocked(now: Date) {
+        guard now.timeIntervalSince(lastPreviewPurge) > max(previewCacheDuration, 1) else { return }
+        lastPreviewPurge = now
+        purgeExpiredPreviewsLocked(now: now)
     }
 
     public func windowIDsWithFreshPreviews() -> Set<CGWindowID> {
