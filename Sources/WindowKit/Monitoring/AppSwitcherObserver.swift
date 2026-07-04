@@ -167,7 +167,7 @@ final class AppSwitcherObserver: @unchecked Sendable {
             let role = (try? child.role()) ?? "?"
             let subrole = (try? child.subrole()) ?? nil
             let count = ((try? child.children()) ?? nil)?.count ?? -1
-            return "\(role ?? "?")/\(subrole ?? "-") children=\(count)"
+            return "\(role)/\(subrole ?? "-") children=\(count)"
         }
         var windowsValue: AnyObject?
         let windowsError = AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &windowsValue)
