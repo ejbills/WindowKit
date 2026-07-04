@@ -44,11 +44,13 @@ final class AppSwitcherObserver: @unchecked Sendable {
 
     private static let probeInterval: TimeInterval = 0.1
     private static let probeTickLimit = 20
+    private static let sessionPollInterval: TimeInterval = 0.025
 
     // Touched only on `queue`.
     private var scanScheduled = false
     private var currentSelection: AppSwitcherSelection?
     private var probeTicksRemaining = 0
+    private var sessionPolling = false
 
     /// Written by `scan()` on `queue`, read by `tearDownDockObserver()` on
     /// main — an unsynchronized strong CF reference re-assigned cross-thread
@@ -86,6 +88,7 @@ final class AppSwitcherObserver: @unchecked Sendable {
             self.currentSelection = nil
             self.scanScheduled = false
             self.probeTicksRemaining = 0
+            self.sessionPolling = false
         }
         if selectionSubject.value != nil { selectionSubject.send(nil) }
     }
@@ -99,6 +102,27 @@ final class AppSwitcherObserver: @unchecked Sendable {
             self.probeTicksRemaining = Self.probeTickLimit
             if !alreadyProbing {
                 self.probeTick()
+            }
+        }
+    }
+
+    // MARK: Session polling
+
+    /// Runs on `queue` only. Once the switcher list is on screen, rescan at a
+    /// fixed cadence until it disappears. Bounded by the session's lifetime
+    /// (the seconds ⌘-Tab is held), so the cost is negligible.
+    private func startSessionPollingIfNeeded() {
+        guard !sessionPolling else { return }
+        sessionPolling = true
+        scheduleSessionPollTick()
+    }
+
+    private func scheduleSessionPollTick() {
+        queue.asyncAfter(deadline: .now() + Self.sessionPollInterval) { [weak self] in
+            guard let self, self.isActive.withLock({ $0 }), self.sessionPolling else { return }
+            self.scan()
+            if self.sessionPolling {
+                self.scheduleSessionPollTick()
             }
         }
     }
@@ -137,12 +161,14 @@ final class AppSwitcherObserver: @unchecked Sendable {
         for notification in [kAXCreatedNotification, kAXUIElementDestroyedNotification] {
             AXObserverAddNotification(newObserver, app, notification as CFString, context)
         }
-        CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(newObserver), .defaultMode)
+        // .commonModes so switcher notifications keep arriving while the main
+        // run loop is in a tracking mode (menu/drag/scroll).
+        CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(newObserver), .commonModes)
     }
 
     private func tearDownDockObserver() {
         guard let observer else { return }
-        CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
+        CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
         if let dockApp {
             for notification in [kAXCreatedNotification, kAXUIElementDestroyedNotification] {
                 AXObserverRemoveNotification(observer, dockApp, notification as CFString)
@@ -193,7 +219,10 @@ final class AppSwitcherObserver: @unchecked Sendable {
             guard let self, let observer = self.observer else { return }
             let context = Unmanaged.passUnretained(self).toOpaque()
             for notification in [kAXSelectedChildrenChangedNotification, kAXUIElementDestroyedNotification] {
-                AXObserverAddNotification(observer, list, notification as CFString, context)
+                let result = AXObserverAddNotification(observer, list, notification as CFString, context)
+                if result != .success {
+                    Logger.warning("Switcher list notification attach failed", details: "notification=\(notification) error=\(result.rawValue)")
+                }
             }
         }
     }
@@ -228,16 +257,21 @@ final class AppSwitcherObserver: @unchecked Sendable {
     private func scan() {
         guard isActive.withLock({ $0 }) else { return }
 
-        let list = findSwitcherList()
+        // Reuse the attached element instead of re-walking the Dock tree each
+        // poll; a dead element (attribute read fails) means the session ended.
+        var list = attachedList.withLockUnchecked { $0 }
+        if let cached = list, (try? cached.subrole()) != Self.switcherSubrole {
+            attachedList.withLockUnchecked { $0 = nil }
+            detachListNotifications(cached)
+            list = nil
+        }
+        if list == nil {
+            list = findSwitcherList()
+        }
 
         // Switcher closed.
         guard let list else {
-            if let attached = attachedList.withLockUnchecked({ list -> AXUIElement? in
-                defer { list = nil }
-                return list
-            }) {
-                detachListNotifications(attached)
-            }
+            sessionPolling = false
             if currentSelection != nil {
                 currentSelection = nil
                 publishSelection(nil)
@@ -246,7 +280,12 @@ final class AppSwitcherObserver: @unchecked Sendable {
             return
         }
 
-        // Switcher open — attach to its selection changes once.
+        // Switcher open — attach to its selection changes once, and poll for the
+        // session's lifetime: selection movement and dismissal must never depend
+        // on the Dock actually delivering AX notifications (field machines on
+        // macOS 26.5 drop them), and a notification-triggered scan can land
+        // before the Dock finishes moving the selection, which polling corrects
+        // on the next tick.
         let didAttach = attachedList.withLockUnchecked { current -> Bool in
             guard current == nil else { return false }
             current = list
@@ -255,6 +294,7 @@ final class AppSwitcherObserver: @unchecked Sendable {
         if didAttach {
             attachListNotifications(list)
         }
+        startSessionPollingIfNeeded()
 
         guard let selection = readSelection(from: list) else { return }
         guard selection != currentSelection else { return }
