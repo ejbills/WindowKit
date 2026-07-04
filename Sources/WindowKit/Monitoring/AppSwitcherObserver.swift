@@ -101,6 +101,7 @@ final class AppSwitcherObserver: @unchecked Sendable {
             let alreadyProbing = self.probeTicksRemaining > 0
             self.probeTicksRemaining = Self.probeTickLimit
             if !alreadyProbing {
+                Logger.debug("Switcher discovery probe started (host saw ⌘-Tab)")
                 self.probeTick()
             }
         }
@@ -305,6 +306,7 @@ final class AppSwitcherObserver: @unchecked Sendable {
             return true
         }
         if didAttach {
+            Logger.debug("Process switcher list found — session tracking active")
             attachListNotifications(list)
         }
         startSessionPollingIfNeeded()
