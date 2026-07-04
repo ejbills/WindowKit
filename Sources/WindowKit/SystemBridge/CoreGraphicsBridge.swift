@@ -106,9 +106,12 @@ private typealias SLSSpaceAddWindowsAndRemoveFromSpacesType = @convention(c) (
     CGSConnectionID, CGSSpaceID, CFArray, Int32
 ) -> Void
 
+/// Copy-rule return must come back as Unmanaged: a `@convention(c)` type
+/// treats a CF class return as +0, so the callee's +1 leaked one spaces
+/// array per call (measured: ~600 leaked space dictionaries per half hour).
 private typealias SLSCopyManagedDisplaySpacesType = @convention(c) (
     CGSConnectionID
-) -> CFArray?
+) -> Unmanaged<CFArray>?
 
 enum SLSSpaceAbsoluteLevel: Int32 {
     case `default` = 0
@@ -335,7 +338,7 @@ func slsSpaceAddWindows(
 
 func slsCopyManagedDisplaySpaces(_ connection: CGSConnectionID) -> CFArray? {
     loadSkyLightFunctions()
-    return copyManagedDisplaySpacesPtr?(connection)
+    return copyManagedDisplaySpacesPtr?(connection)?.takeRetainedValue()
 }
 
 public func activeSpaceIDs() -> Set<Int> {
