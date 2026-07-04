@@ -51,6 +51,10 @@ final class AppSwitcherObserver: @unchecked Sendable {
     private var currentSelection: AppSwitcherSelection?
     private var probeTicksRemaining = 0
     private var sessionPolling = false
+    /// Consecutive session polls the Dock failed to answer (throwing reads).
+    /// ~275ms each (poll interval + messaging timeout), so 36 ≈ 10s wedged.
+    private static let unknownReadLimit = 36
+    private var unknownReads = 0
 
     /// Written by `scan()` on `queue`, read by `tearDownDockObserver()` on
     /// main — an unsynchronized strong CF reference re-assigned cross-thread
@@ -89,6 +93,7 @@ final class AppSwitcherObserver: @unchecked Sendable {
             self.scanScheduled = false
             self.probeTicksRemaining = 0
             self.sessionPolling = false
+            self.unknownReads = 0
         }
         if selectionSubject.value != nil { selectionSubject.send(nil) }
     }
@@ -271,8 +276,19 @@ final class AppSwitcherObserver: @unchecked Sendable {
                     detachListNotifications(cached)
                     list = nil
                 }
+                unknownReads = 0
             } catch {
-                return
+                // Dock not answering. Transient hangs ride through, but a Dock
+                // that stays wedged must not pin the poll loop (and the host's
+                // switcher session) open forever — after ~10s of consecutive
+                // no-answers, declare the session over.
+                unknownReads += 1
+                guard unknownReads >= Self.unknownReadLimit else { return }
+                Logger.warning("Dock unresponsive for \(unknownReads) consecutive polls — ending switcher session")
+                unknownReads = 0
+                attachedList.withLockUnchecked { $0 = nil }
+                detachListNotifications(cached)
+                list = nil
             }
         }
         if list == nil {
