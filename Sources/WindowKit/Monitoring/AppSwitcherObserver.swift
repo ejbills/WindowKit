@@ -380,7 +380,21 @@ final class AppSwitcherObserver: @unchecked Sendable {
     // MARK: AX reads (queue only)
 
     private func dockElement() -> AXUIElement {
-        let pid = dockPID != 0 ? dockPID : currentDockPID()
+        var pid = dockPID != 0 ? dockPID : currentDockPID()
+        let live = currentDockPID()
+        if live != 0, live != pid {
+            // The Dock relaunched without a workspace notification — launchd
+            // respawns (including the host app's own `killall Dock` when it
+            // disables the native dock at startup) aren't reliably announced,
+            // and a cached dead PID fails every AX read with cannotComplete.
+            // Talk to the live process and re-anchor the notification observer.
+            Logger.info("Dock relaunched — rebinding switcher observer", details: "cached=\(pid) live=\(live)")
+            pid = live
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.isActive.withLock({ $0 }), self.dockPID != live else { return }
+                self.registerDockObserver()
+            }
+        }
         let app = AXUIElementCreateApplication(pid)
         app.setMessagingTimeout(seconds: Self.messagingTimeout)
         return app
