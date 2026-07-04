@@ -142,9 +142,40 @@ final class AppSwitcherObserver: @unchecked Sendable {
             probeTicksRemaining = 0
             return
         }
+        guard probeTicksRemaining > 0 else {
+            logProbeExhaustedDiagnostic()
+            return
+        }
         queue.asyncAfter(deadline: .now() + Self.probeInterval) { [weak self] in
             self?.probeTick()
         }
+    }
+
+    /// One-shot dump when a full probe cycle never found the switcher list —
+    /// distinguishes an unreadable Dock tree (error codes) from a readable tree
+    /// that simply lacks the `AXProcessSwitcherList` (field machines show the
+    /// native switcher on screen while our walk finds nothing). Runs on `queue`.
+    private func logProbeExhaustedDiagnostic() {
+        let app = dockElement()
+        var childrenValue: AnyObject?
+        let error = AXUIElementCopyAttributeValue(app, kAXChildrenAttribute as CFString, &childrenValue)
+        guard error == .success, let children = childrenValue as? [AXUIElement] else {
+            Logger.warning("Switcher probe exhausted — Dock AX children unreadable", details: "error=\(error.rawValue) pid=\(dockPID) trusted=\(AXIsProcessTrusted())")
+            return
+        }
+        let entries = children.map { child -> String in
+            let role = (try? child.role()) ?? "?"
+            let subrole = (try? child.subrole()) ?? nil
+            let count = ((try? child.children()) ?? nil)?.count ?? -1
+            return "\(role ?? "?")/\(subrole ?? "-") children=\(count)"
+        }
+        var windowsValue: AnyObject?
+        let windowsError = AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &windowsValue)
+        let windowCount = (windowsValue as? [AXUIElement])?.count
+        Logger.warning(
+            "Switcher probe exhausted — list not found in Dock tree",
+            details: "pid=\(dockPID) children=[\(entries.joined(separator: ", "))] axWindows=\(windowCount.map(String.init) ?? "err\(windowsError.rawValue)")"
+        )
     }
 
     // MARK: Dock observer (main)
