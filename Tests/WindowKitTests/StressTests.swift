@@ -352,6 +352,31 @@ final class RepositoryStressTests: XCTestCase {
         XCTAssertFalse(cached.contains(where: { $0.id == 1 }), "Suppressed window should not be in cache")
     }
 
+    func testStorePathPurgesExpiredPreviewBitmaps() {
+        let repo = WindowRepository()
+        let pid: pid_t = 7777
+        repo.previewCacheDuration = 0.05
+
+        let w = makeMockWindow(id: 1, pid: pid)
+        _ = repo.store(forPID: pid, windows: [w])
+        let context = CGContext(
+            data: nil, width: 1, height: 1, bitsPerComponent: 8,
+            bytesPerRow: 4, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        )!
+        repo.storePreview(context.makeImage()!, forWindowID: 1)
+        XCTAssertNotNil(repo.readCache(forPID: pid).first?.cachedPreview)
+
+        // Past the cache duration AND the purge rate limit: the next store
+        // must drop the expired bitmap without any explicit purge call.
+        Thread.sleep(forTimeInterval: 1.2)
+        _ = repo.store(forPID: pid, windows: [makeMockWindow(id: 1, pid: pid)])
+        XCTAssertNil(
+            repo.readCache(forPID: pid).first?.cachedPreview,
+            "Expired preview bitmap must be released by the store path"
+        )
+    }
+
     func testPreviewCacheStressDoesNotLeak() {
         let repo = WindowRepository()
         let pid: pid_t = 6666
