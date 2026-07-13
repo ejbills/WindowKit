@@ -16,6 +16,10 @@ public final class WindowTracker {
         didSet { discovery.screenshotService.headless = headless }
     }
 
+    var previewMaxPixelDimension: CGFloat? {
+        didSet { discovery.screenshotService.maxPixelDimension = previewMaxPixelDimension }
+    }
+
     var discovery: WindowDiscovery
     private let enumerator = WindowEnumerator()
 
@@ -36,6 +40,7 @@ public final class WindowTracker {
     private var wakeObserver: NSObjectProtocol?
     private var wakeCooldownUntil: ContinuousClock.Instant?
     private var wakeRecoveryTask: Task<Void, Never>?
+    private var previewPurgeTask: Task<Void, Never>?
 
     // Wake recovery backoff parameters
     private static let wakeInitialDelay: Duration = .seconds(1)
@@ -70,6 +75,21 @@ public final class WindowTracker {
 
     /// AX messaging timeout — lower than the 6s default to fail fast on hung apps.
     public static let axMessagingTimeout: Float = 2.0
+
+    /// Expired previews are otherwise only released by the store-path sweep, which
+    /// starves at steady state (no store calls → every expired CGImage stays resident).
+    private func startPreviewPurgeLoop() {
+        previewPurgeTask?.cancel()
+        previewPurgeTask = Task { [weak self] in
+            while !Task.isCancelled {
+                let interval = max(self?.repository.previewCacheDuration
+                    ?? WindowRepository.defaultPreviewCacheDuration, 30)
+                try? await Task.sleep(for: .seconds(interval))
+                guard !Task.isCancelled, let self else { return }
+                self.repository.purgeExpiredPreviews()
+            }
+        }
+    }
 
     public func startTracking() {
         guard !isTracking else { return }
@@ -106,6 +126,7 @@ public final class WindowTracker {
 
         startNotificationCenterWatcher()
         startWakeObserver()
+        startPreviewPurgeLoop()
 
         Task { [weak self] in
             await self?.performFullScan()
@@ -120,6 +141,8 @@ public final class WindowTracker {
         wakeRecoveryTask?.cancel()
         wakeRecoveryTask = nil
         wakeCooldownUntil = nil
+        previewPurgeTask?.cancel()
+        previewPurgeTask = nil
 
         subscriptions.removeAll()
         watcherManager?.unwatchAll()

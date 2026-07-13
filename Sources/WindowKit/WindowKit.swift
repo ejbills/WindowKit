@@ -209,6 +209,25 @@ public final class WindowKit {
         set { tracker.repository.previewCacheDuration = newValue }
     }
 
+    /// Caps the pixel size of window-preview captures. When set, any capture whose
+    /// longest edge exceeds this value is downsampled to it (and flattened to 8-bit)
+    /// before being cached. Raw captures are full-Retina deep-color bitmaps
+    /// (~24MB per 14" window); a client that renders preview cards should set this
+    /// to roughly twice its card size in pixels.
+    public var previewMaxPixelDimension: CGFloat? {
+        didSet {
+            tracker.previewMaxPixelDimension = previewMaxPixelDimension
+            orphanedWindowTracker.previewMaxPixelDimension = previewMaxPixelDimension
+        }
+    }
+
+    /// Releases every cached preview whose TTL has lapsed. The repository also purges
+    /// opportunistically during window churn, and the tracker sweeps on a timer while
+    /// tracking is active; call this for an immediate release (e.g. on memory pressure).
+    public func purgeExpiredPreviews() {
+        tracker.repository.purgeExpiredPreviews()
+    }
+
     public var events: AnyPublisher<WindowEvent, Never> { tracker.events }
 
     public var processEvents: AnyPublisher<ProcessEvent, Never> { tracker.processEvents }

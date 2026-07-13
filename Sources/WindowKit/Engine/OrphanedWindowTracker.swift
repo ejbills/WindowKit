@@ -27,7 +27,11 @@ final class OrphanedWindowTracker: @unchecked Sendable {
     /// Wait out the minimize animation before capturing the thumbnail.
     static let captureSettleDelay: TimeInterval = 0.6
     private let queue = DispatchQueue(label: "com.windowkit.dockMinimized", qos: .userInitiated)
-    private let screenshotService = ScreenshotService()
+    private var screenshotService = ScreenshotService()
+
+    var previewMaxPixelDimension: CGFloat? {
+        didSet { screenshotService.maxPixelDimension = previewMaxPixelDimension }
+    }
 
     var windowsPublisher: AnyPublisher<[DockMinimizedWindow], Never> { subject.eraseToAnyPublisher() }
     private let subject = CurrentValueSubject<[DockMinimizedWindow], Never>([])
