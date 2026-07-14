@@ -182,12 +182,9 @@ struct WindowDiscovery {
             subrole: subrole
         )
 
-        // Discovery never captures previews eagerly: capturing every discovered
-        // window (app activations, space changes → full scans) kept the entire
-        // window set's bitmaps perpetually resident (~3MB each) and spiked RSS
-        // with concurrent raw captures. Previews are captured lazily on the
-        // preview paths (capturePreview / cachedWindowsRefreshingPreviews /
-        // refreshPreviews); discovery only carries existing ones forward.
+        // Discovery only carries existing previews forward; capture happens
+        // lazily on the preview paths (capturePreview / refreshPreviews /
+        // cachedWindowsRefreshingPreviews).
         window.cachedPreview = existingWindow?.cachedPreview
         window.previewTimestamp = existingWindow?.previewTimestamp
 
@@ -344,8 +341,6 @@ struct WindowDiscovery {
             subrole: subrole
         )
 
-        // See captureFromSCKWindow: discovery only carries existing previews
-        // forward; capture happens lazily on the preview paths.
         window.cachedPreview = existingWindow?.cachedPreview
         window.previewTimestamp = existingWindow?.previewTimestamp
 

@@ -30,7 +30,8 @@ public final class WindowTracker {
     public var processEvents: AnyPublisher<ProcessEvent, Never> { processWatcher.events }
     public var frontmostApplication: NSRunningApplication? { processWatcher.frontmostApplication }
 
-    private let debouncedTasks = OSAllocatedUnfairLock(initialState: [String: Task<Void, Never>]())
+    private let debouncedTasks = OSAllocatedUnfairLock(initialState: [String: (task: Task<Void, Never>, generation: UInt64)]())
+    private let debounceGeneration = OSAllocatedUnfairLock(initialState: UInt64(0))
     private let pendingOperations = OSAllocatedUnfairLock(initialState: [String: [() async -> Void]]())
     private let inFlightTracks = OSAllocatedUnfairLock(initialState: [pid_t: Task<[CapturedWindow], Never>]())
     private let destroyBurstState = OSAllocatedUnfairLock(initialState: [pid_t: DestroyBurstState]())
@@ -151,14 +152,14 @@ public final class WindowTracker {
         notificationCenterWatcher = nil
         stopWakeObserver()
 
-        let tasks = debouncedTasks.withLockUnchecked { tasks -> [String: Task<Void, Never>] in
+        let tasks = debouncedTasks.withLockUnchecked { tasks -> [String: (task: Task<Void, Never>, generation: UInt64)] in
             let snapshot = tasks
             tasks.removeAll()
             return snapshot
         }
 
-        for (_, task) in tasks {
-            task.cancel()
+        for (_, entry) in tasks {
+            entry.task.cancel()
         }
 
         pendingOperations.withLockUnchecked { $0.removeAll() }
@@ -720,15 +721,16 @@ public final class WindowTracker {
 
     private func debounce(key: String, interval: Duration = .milliseconds(Int(eventDebounceInterval * 1000)), operation: @escaping () async -> Void) {
         pendingOperations.withLockUnchecked { $0[key, default: []].append(operation) }
+        let generation = debounceGeneration.withLockUnchecked { gen -> UInt64 in
+            gen += 1
+            return gen
+        }
         debouncedTasks.withLockUnchecked { tasks in
-            tasks[key]?.cancel()
-            var task: Task<Void, Never>!
-            task = Task { [pendingOperations, debouncedTasks] in
+            tasks[key]?.task.cancel()
+            let task = Task { [pendingOperations, debouncedTasks] in
                 defer {
-                    // Drop the completed handle so keys for pids seen once
-                    // don't accumulate for the tracker's lifetime.
                     debouncedTasks.withLockUnchecked { tasks in
-                        if tasks[key] == task { tasks.removeValue(forKey: key) }
+                        if tasks[key]?.generation == generation { tasks.removeValue(forKey: key) }
                     }
                 }
                 do {
@@ -744,7 +746,7 @@ public final class WindowTracker {
                     await op()
                 }
             }
-            tasks[key] = task
+            tasks[key] = (task, generation)
         }
     }
 
