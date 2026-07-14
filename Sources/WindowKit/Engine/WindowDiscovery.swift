@@ -183,8 +183,7 @@ struct WindowDiscovery {
         )
 
         // Discovery only carries existing previews forward; capture happens
-        // lazily on the preview paths (capturePreview / refreshPreviews /
-        // cachedWindowsRefreshingPreviews).
+        // lazily on the preview paths.
         window.cachedPreview = existingWindow?.cachedPreview
         window.previewTimestamp = existingWindow?.previewTimestamp
 

@@ -46,11 +46,8 @@ public struct ScreenshotService: Sendable {
         return image
     }
 
-    /// CGImageSetCachingFlags(image, kCGImageCachingTransient): drawing a raw
-    /// multi-megapixel capture inserts its decoded pixels into CoreGraphics'
-    /// process-global image cache under the cache lock, and a burst of captures
-    /// (an app quit re-triggers discovery) stalls concurrent main-thread drawing —
-    /// measured as dock animation stutter. Transient images bypass that cache.
+    /// Marks captures transient so drawing them doesn't insert their decoded
+    /// pixels into CoreGraphics' process-global image cache.
     private static let cgImageSetCachingFlags: (@convention(c) (CGImage, UInt32) -> Void)? = {
         guard let sym = dlsym(dlopen(nil, RTLD_LAZY), "CGImageSetCachingFlags") else { return nil }
         return unsafeBitCast(sym, to: (@convention(c) (CGImage, UInt32) -> Void).self)

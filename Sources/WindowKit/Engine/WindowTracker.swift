@@ -556,11 +556,8 @@ public final class WindowTracker {
             updateWindowTimestamp(windowID: windowID, pid: pid)
 
         case .titleChanged(let element):
-            // Apps that rewrite their title continuously (terminal spinners
-            // update every ~100ms) starve a trailing-edge debounce and made
-            // per-event AX reads a measurable CPU cost. Coalesce instead:
-            // events during the window are absorbed for free, and the AX
-            // round-trips (windowID/role/title) happen once when it fires.
+            // Coalesced: apps rewriting their title continuously would starve
+            // a debounce, and the AX reads must not run per event.
             coalesce(key: "title-\(pid)") { [weak self] in
                 guard let self else { return }
                 let windowID = try? element.windowID()
@@ -730,11 +727,9 @@ public final class WindowTracker {
     }
 
     /// Throttle for high-rate event streams: the first event schedules
-    /// `operation` after `interval`, and events arriving before it fires are
-    /// absorbed with no per-event work (unlike `debounce`, which cancels and
-    /// reschedules per event and never fires under a sustained stream). An
-    /// event absorbed while `operation` is mid-flight schedules one follow-up
-    /// run, so the stream's final state is always applied.
+    /// `operation` after `interval`; events arriving before it fires are
+    /// absorbed, and one absorbed mid-flight schedules a single follow-up so
+    /// the stream's final state always applies.
     private func coalesce(key: String, interval: Duration = .milliseconds(Int(eventDebounceInterval * 1000)), operation: @escaping () async -> Void) {
         coalescedTasks.withLockUnchecked { tasks in
             guard tasks[key] == nil else {
