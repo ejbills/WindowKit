@@ -425,6 +425,7 @@ public final class WindowRepository: @unchecked Sendable {
                oldWindow.isMinimized != newWindow.isMinimized ||
                oldWindow.isFullscreen != newWindow.isFullscreen ||
                oldWindow.isOwnerHidden != newWindow.isOwnerHidden ||
+               oldWindow.isVisible != newWindow.isVisible ||
                oldWindow.bounds != newWindow.bounds {
                 modified.insert(newWindow)
             }
