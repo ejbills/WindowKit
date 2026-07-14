@@ -45,6 +45,16 @@ public struct ScreenshotService: Sendable {
         return image
     }
 
+    /// CGImageSetCachingFlags(image, transient): drawing a raw multi-megapixel capture
+    /// inserts its decoded pixels into CoreGraphics' process-global image cache under
+    /// the cache lock, and a burst of captures (an app quit re-triggers discovery)
+    /// stalls concurrent main-thread drawing — measured as dock animation stutter.
+    /// Transient images bypass that cache; each capture is drawn exactly once here.
+    private static let cgImageSetCachingFlags: (@convention(c) (CGImage, UInt32) -> Void)? = {
+        guard let sym = dlsym(dlopen(nil, RTLD_LAZY), "CGImageSetCachingFlags") else { return nil }
+        return unsafeBitCast(sym, to: (@convention(c) (CGImage, UInt32) -> Void).self)
+    }()
+
     static func downsampled(_ image: CGImage, maxDimension: CGFloat) -> CGImage? {
         let width = CGFloat(image.width)
         let height = CGFloat(image.height)
@@ -55,6 +65,8 @@ public struct ScreenshotService: Sendable {
         // Deep-color captures (16 bits/channel) are redrawn even at 1:1 so the
         // retained bitmap is 8-bit — half the resident cost for identical preview output.
         guard scale < 1 || image.bitsPerComponent > 8 else { return nil }
+
+        cgImageSetCachingFlags?(image, 0) // kCGImageCachingTransient
 
         let targetWidth = max(1, Int(width * scale))
         let targetHeight = max(1, Int(height * scale))
