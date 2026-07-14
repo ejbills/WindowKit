@@ -764,7 +764,7 @@ public final class WindowTracker {
             self.wakeCooldownUntil = ContinuousClock.now + Self.wakeMaxDelay
 
             self.debouncedTasks.withLockUnchecked { tasks in
-                for (_, task) in tasks { task.cancel() }
+                for (_, entry) in tasks { entry.task.cancel() }
                 tasks.removeAll()
             }
 
