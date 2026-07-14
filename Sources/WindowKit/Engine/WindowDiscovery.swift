@@ -101,11 +101,10 @@ struct WindowDiscovery {
         }
         let validAppWindows = appWindows.filter(isValidSCKWindow)
         let visibleWindowIDs = Set(validAppWindows.map(\.windowID))
-        let freshIDs = repository.windowIDsWithFreshPreviews(forPID: pid)
 
         let results: [CapturedWindow] = await ConcurrencyHelpers.mapConcurrent(validAppWindows, maxConcurrent: 4, timeout: 10) { scWindow -> CapturedWindow? in
             return await self.onAXQueue {
-                self.captureFromSCKWindow(scWindow, app: app, freshIDs: freshIDs)
+                self.captureFromSCKWindow(scWindow, app: app)
             } ?? nil
         }
 
@@ -134,7 +133,7 @@ struct WindowDiscovery {
     }
 
     @available(macOS 12.3, *)
-    private func captureFromSCKWindow(_ scWindow: SCWindow, app: NSRunningApplication, freshIDs: Set<CGWindowID>) -> CapturedWindow? {
+    private func captureFromSCKWindow(_ scWindow: SCWindow, app: NSRunningApplication) -> CapturedWindow? {
         let pid = app.processIdentifier
         let appElement = AXUIElement.application(pid: pid)
 
@@ -183,16 +182,10 @@ struct WindowDiscovery {
             subrole: subrole
         )
 
-        if freshIDs.contains(scWindow.windowID) {
-            window.cachedPreview = existingWindow?.cachedPreview
-            window.previewTimestamp = existingWindow?.previewTimestamp
-        } else if let image = try? screenshotService.captureWindow(id: scWindow.windowID) {
-            window.cachedPreview = image
-            window.previewTimestamp = Date()
-        } else {
-            window.cachedPreview = existingWindow?.cachedPreview
-            window.previewTimestamp = existingWindow?.previewTimestamp
-        }
+        // Discovery only carries existing previews forward; capture happens
+        // lazily on the preview paths.
+        window.cachedPreview = existingWindow?.cachedPreview
+        window.previewTimestamp = existingWindow?.previewTimestamp
 
         return window
     }
@@ -290,7 +283,6 @@ struct WindowDiscovery {
         guard !candidateWindows.isEmpty else { return [] }
 
         let pid = app.processIdentifier
-        let freshIDs = repository.windowIDsWithFreshPreviews(forPID: pid)
         let appElement = AXUIElement.application(pid: pid)
         let results = await ConcurrencyHelpers.mapConcurrent(candidateWindows, maxConcurrent: 4, timeout: 10) { candidate -> CapturedWindow? in
             await self.onAXQueue {
@@ -299,8 +291,7 @@ struct WindowDiscovery {
                     windowID: candidate.windowID,
                     descriptor: candidate.descriptor,
                     app: app,
-                    appElement: appElement,
-                    freshIDs: freshIDs
+                    appElement: appElement
                 )
             } ?? nil
         }
@@ -313,8 +304,7 @@ struct WindowDiscovery {
         windowID: CGWindowID,
         descriptor: CGWindowDescriptor,
         app: NSRunningApplication,
-        appElement: AXUIElement,
-        freshIDs: Set<CGWindowID>
+        appElement: AXUIElement
     ) -> CapturedWindow? {
         let title = (try? axWindow.title()) ?? windowID.title()
         let isMinimized = (try? axWindow.isMinimized()) ?? false
@@ -350,16 +340,8 @@ struct WindowDiscovery {
             subrole: subrole
         )
 
-        if freshIDs.contains(windowID) {
-            window.cachedPreview = existingWindow?.cachedPreview
-            window.previewTimestamp = existingWindow?.previewTimestamp
-        } else if let image = try? screenshotService.captureWindow(id: windowID) {
-            window.cachedPreview = image
-            window.previewTimestamp = Date()
-        } else {
-            window.cachedPreview = existingWindow?.cachedPreview
-            window.previewTimestamp = existingWindow?.previewTimestamp
-        }
+        window.cachedPreview = existingWindow?.cachedPreview
+        window.previewTimestamp = existingWindow?.previewTimestamp
 
         return window
     }

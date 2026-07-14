@@ -42,18 +42,20 @@ public struct ScreenshotService: Sendable {
         if let cap = maxPixelDimension, let scaled = Self.downsampled(image, maxDimension: cap) {
             return scaled
         }
+        Self.cgImageSetCachingFlags?(image, Self.kCGImageCachingTransient)
         return image
     }
 
-    /// CGImageSetCachingFlags(image, transient): drawing a raw multi-megapixel capture
-    /// inserts its decoded pixels into CoreGraphics' process-global image cache under
-    /// the cache lock, and a burst of captures (an app quit re-triggers discovery)
-    /// stalls concurrent main-thread drawing — measured as dock animation stutter.
-    /// Transient images bypass that cache; each capture is drawn exactly once here.
+    /// Marks captures transient so drawing them doesn't insert their decoded
+    /// pixels into CoreGraphics' process-global image cache.
     private static let cgImageSetCachingFlags: (@convention(c) (CGImage, UInt32) -> Void)? = {
         guard let sym = dlsym(dlopen(nil, RTLD_LAZY), "CGImageSetCachingFlags") else { return nil }
         return unsafeBitCast(sym, to: (@convention(c) (CGImage, UInt32) -> Void).self)
     }()
+
+    /// From WebKit's CoreGraphicsSPI.h: kCGImageCachingTransient = 1,
+    /// kCGImageCachingTemporary = 3 (the default). 0 is not a defined flag value.
+    private static let kCGImageCachingTransient: UInt32 = 1
 
     static func downsampled(_ image: CGImage, maxDimension: CGFloat) -> CGImage? {
         let width = CGFloat(image.width)
@@ -66,7 +68,7 @@ public struct ScreenshotService: Sendable {
         // retained bitmap is 8-bit — half the resident cost for identical preview output.
         guard scale < 1 || image.bitsPerComponent > 8 else { return nil }
 
-        cgImageSetCachingFlags?(image, 0) // kCGImageCachingTransient
+        cgImageSetCachingFlags?(image, kCGImageCachingTransient)
 
         let targetWidth = max(1, Int(width * scale))
         let targetHeight = max(1, Int(height * scale))

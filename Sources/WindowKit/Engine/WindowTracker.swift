@@ -30,7 +30,10 @@ public final class WindowTracker {
     public var processEvents: AnyPublisher<ProcessEvent, Never> { processWatcher.events }
     public var frontmostApplication: NSRunningApplication? { processWatcher.frontmostApplication }
 
-    private let debouncedTasks = OSAllocatedUnfairLock(initialState: [String: Task<Void, Never>]())
+    private let debouncedTasks = OSAllocatedUnfairLock(initialState: [String: (task: Task<Void, Never>, generation: UInt64)]())
+    private let debounceGeneration = OSAllocatedUnfairLock(initialState: UInt64(0))
+    private let coalescedTasks = OSAllocatedUnfairLock(initialState: [String: Task<Void, Never>]())
+    private let coalescedFollowUps = OSAllocatedUnfairLock(initialState: Set<String>())
     private let pendingOperations = OSAllocatedUnfairLock(initialState: [String: [() async -> Void]]())
     private let inFlightTracks = OSAllocatedUnfairLock(initialState: [pid_t: Task<[CapturedWindow], Never>]())
     private let destroyBurstState = OSAllocatedUnfairLock(initialState: [pid_t: DestroyBurstState]())
@@ -151,15 +154,16 @@ public final class WindowTracker {
         notificationCenterWatcher = nil
         stopWakeObserver()
 
-        let tasks = debouncedTasks.withLockUnchecked { tasks -> [String: Task<Void, Never>] in
+        let tasks = debouncedTasks.withLockUnchecked { tasks -> [String: (task: Task<Void, Never>, generation: UInt64)] in
             let snapshot = tasks
             tasks.removeAll()
             return snapshot
         }
 
-        for (_, task) in tasks {
-            task.cancel()
+        for (_, entry) in tasks {
+            entry.task.cancel()
         }
+        cancelCoalescedTasks()
 
         pendingOperations.withLockUnchecked { $0.removeAll() }
         destroyBurstState.withLockUnchecked { $0.removeAll() }
@@ -552,13 +556,16 @@ public final class WindowTracker {
             updateWindowTimestamp(windowID: windowID, pid: pid)
 
         case .titleChanged(let element):
-            let windowID = try? element.windowID()
-            let role = try? element.role()
-            let newTitle = try? element.title()
-            guard role == kAXWindowRole as String, let newTitle else { break }
-            debounce(key: "title-\(pid)") { [weak self] in
-                self?.updateWindowState(windowID: windowID, element: element, pid: pid) { window in
-                    CapturedWindow(
+            // Coalesced: apps rewriting their title continuously would starve
+            // a debounce, and the AX reads must not run per event.
+            coalesce(key: "title-\(pid)") { [weak self] in
+                guard let self else { return }
+                let windowID = try? element.windowID()
+                guard (try? element.role()) == kAXWindowRole as String,
+                      let newTitle = try? element.title() else { return }
+                updateWindowState(windowID: windowID, element: element, pid: pid) { window in
+                    guard window.title != newTitle else { return nil }
+                    return CapturedWindow(
                         id: window.id, title: newTitle, ownerBundleID: window.ownerBundleID,
                         ownerPID: window.ownerPID, bounds: window.bounds,
                         isMinimized: window.isMinimized, isFullscreen: window.isFullscreen,
@@ -597,11 +604,13 @@ public final class WindowTracker {
         }
     }
 
+    /// Applies `update` to the matched window; returning nil leaves the
+    /// repository untouched and emits nothing.
     private func updateWindowState(
         windowID: CGWindowID?,
         element: AXUIElement,
         pid: pid_t,
-        update: (CapturedWindow) -> CapturedWindow
+        update: (CapturedWindow) -> CapturedWindow?
     ) {
         let changes = repository.modify(forPID: pid) { windows in
             let existing: CapturedWindow?
@@ -612,9 +621,8 @@ public final class WindowTracker {
             } else {
                 existing = nil
             }
-            guard let existing else { return }
+            guard let existing, var updated = update(existing) else { return }
             windows.remove(existing)
-            var updated = update(existing)
             updated.cachedPreview = existing.cachedPreview
             updated.previewTimestamp = existing.previewTimestamp
             windows.insert(updated)
@@ -718,11 +726,64 @@ public final class WindowTracker {
         }
     }
 
+    /// Throttle for high-rate event streams: the first event schedules
+    /// `operation` after `interval`; events arriving before it fires are
+    /// absorbed, and one absorbed mid-flight schedules a single follow-up so
+    /// the stream's final state always applies.
+    private func coalesce(key: String, interval: Duration = .milliseconds(Int(eventDebounceInterval * 1000)), operation: @escaping () async -> Void) {
+        coalescedTasks.withLockUnchecked { tasks in
+            guard tasks[key] == nil else {
+                coalescedFollowUps.withLockUnchecked { _ = $0.insert(key) }
+                return
+            }
+            tasks[key] = Task { [coalescedTasks, coalescedFollowUps] in
+                var cancelled = false
+                do {
+                    try await Task.sleep(for: interval)
+                } catch { cancelled = true }
+                if !cancelled {
+                    await withCheckedContinuation { continuation in
+                        self.axQueue.async { continuation.resume() }
+                    }
+                    if !Task.isCancelled {
+                        await operation()
+                    }
+                }
+                let followUp = coalescedFollowUps.withLockUnchecked { $0.remove(key) != nil }
+                coalescedTasks.withLockUnchecked { _ = $0.removeValue(forKey: key) }
+                if followUp, !Task.isCancelled {
+                    self.coalesce(key: key, interval: interval, operation: operation)
+                }
+            }
+        }
+    }
+
+    private func cancelCoalescedTasks() {
+        coalescedFollowUps.withLockUnchecked { $0.removeAll() }
+        let tasks = coalescedTasks.withLockUnchecked { tasks -> [String: Task<Void, Never>] in
+            let snapshot = tasks
+            tasks.removeAll()
+            return snapshot
+        }
+        for (_, task) in tasks {
+            task.cancel()
+        }
+    }
+
     private func debounce(key: String, interval: Duration = .milliseconds(Int(eventDebounceInterval * 1000)), operation: @escaping () async -> Void) {
         pendingOperations.withLockUnchecked { $0[key, default: []].append(operation) }
+        let generation = debounceGeneration.withLockUnchecked { gen -> UInt64 in
+            gen += 1
+            return gen
+        }
         debouncedTasks.withLockUnchecked { tasks in
-            tasks[key]?.cancel()
-            tasks[key] = Task { [pendingOperations] in
+            tasks[key]?.task.cancel()
+            let task = Task { [pendingOperations, debouncedTasks] in
+                defer {
+                    debouncedTasks.withLockUnchecked { tasks in
+                        if tasks[key]?.generation == generation { tasks.removeValue(forKey: key) }
+                    }
+                }
                 do {
                     try await Task.sleep(for: interval)
                 } catch { return }
@@ -736,6 +797,7 @@ public final class WindowTracker {
                     await op()
                 }
             }
+            tasks[key] = (task, generation)
         }
     }
 
@@ -753,9 +815,10 @@ public final class WindowTracker {
             self.wakeCooldownUntil = ContinuousClock.now + Self.wakeMaxDelay
 
             self.debouncedTasks.withLockUnchecked { tasks in
-                for (_, task) in tasks { task.cancel() }
+                for (_, entry) in tasks { entry.task.cancel() }
                 tasks.removeAll()
             }
+            self.cancelCoalescedTasks()
 
             self.pendingOperations.withLockUnchecked { $0.removeAll() }
             self.destroyBurstState.withLockUnchecked { $0.removeAll() }

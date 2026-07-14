@@ -322,7 +322,15 @@ public final class WindowKit {
     }
 
     private static let launchTimeoutSeconds: TimeInterval = 30
-    private static let badgePollInterval: TimeInterval = 5
+
+    /// How often dock badge state is polled while badge polling is active.
+    /// Clamped to at least 1 second; changing it reschedules a running poll.
+    public var badgePollInterval: TimeInterval = 5 {
+        didSet {
+            guard badgePollInterval != oldValue, badgePollTimer != nil else { return }
+            startBadgePolling()
+        }
+    }
 
     private let tracker: WindowTracker
     private let orphanedWindowTracker = OrphanedWindowTracker()
@@ -368,6 +376,7 @@ public final class WindowKit {
                     self.badgeStore.invalidateCache()
                     self.appStates[pid]?.invalidateBadge()
                     self.appStates[pid]?.invalidate()
+                    self.appStates.removeValue(forKey: pid)
                     self.refreshAllBadges()
 
                 case .applicationActivated:
@@ -630,12 +639,12 @@ public final class WindowKit {
         orphanedWindowTracker.restore(id: id)
     }
 
-    /// Starts a 5-second polling timer for dock badge state.
+    /// Starts a repeating polling timer for dock badge state at `badgePollInterval`.
     public func startBadgePolling() {
         guard badgeTrackingEnabled else { return }
         stopBadgePolling()
         Logger.debug("Badge polling started")
-        badgePollTimer = Timer.scheduledTimer(withTimeInterval: Self.badgePollInterval, repeats: true) { [weak self] _ in
+        badgePollTimer = Timer.scheduledTimer(withTimeInterval: max(1, badgePollInterval), repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.refreshAllBadges()
             }
