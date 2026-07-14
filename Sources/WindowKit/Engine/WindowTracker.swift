@@ -722,7 +722,15 @@ public final class WindowTracker {
         pendingOperations.withLockUnchecked { $0[key, default: []].append(operation) }
         debouncedTasks.withLockUnchecked { tasks in
             tasks[key]?.cancel()
-            tasks[key] = Task { [pendingOperations] in
+            var task: Task<Void, Never>!
+            task = Task { [pendingOperations, debouncedTasks] in
+                defer {
+                    // Drop the completed handle so keys for pids seen once
+                    // don't accumulate for the tracker's lifetime.
+                    debouncedTasks.withLockUnchecked { tasks in
+                        if tasks[key] == task { tasks.removeValue(forKey: key) }
+                    }
+                }
                 do {
                     try await Task.sleep(for: interval)
                 } catch { return }
@@ -736,6 +744,7 @@ public final class WindowTracker {
                     await op()
                 }
             }
+            tasks[key] = task
         }
     }
 

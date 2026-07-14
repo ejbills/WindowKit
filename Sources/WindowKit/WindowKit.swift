@@ -368,6 +368,7 @@ public final class WindowKit {
                     self.badgeStore.invalidateCache()
                     self.appStates[pid]?.invalidateBadge()
                     self.appStates[pid]?.invalidate()
+                    self.appStates.removeValue(forKey: pid)
                     self.refreshAllBadges()
 
                 case .applicationActivated:

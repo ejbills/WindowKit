@@ -42,6 +42,10 @@ public struct ScreenshotService: Sendable {
         if let cap = maxPixelDimension, let scaled = Self.downsampled(image, maxDimension: cap) {
             return scaled
         }
+        // Raw captures that skip the downsample redraw (already small and 8-bit)
+        // are still WindowServer-backed surfaces; without the transient flag every
+        // draw duplicates their pixels into CoreGraphics' process-global cache.
+        Self.cgImageSetCachingFlags?(image, 0) // kCGImageCachingTransient
         return image
     }
 
