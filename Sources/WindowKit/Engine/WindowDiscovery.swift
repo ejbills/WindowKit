@@ -299,6 +299,29 @@ struct WindowDiscovery {
         return results
     }
 
+    /// On-demand capture of a single window absent from the tracked cache — e.g. a
+    /// minimized window of an untracked agent app surfaced through the native Dock.
+    /// Resolves the CG descriptor and the owner's matching AX window off main.
+    func captureWindow(withID windowID: CGWindowID) async -> CapturedWindow? {
+        let capture = await onAXQueue { () -> CapturedWindow? in
+            guard let descriptor = cgWindowDescriptor(forWindowID: windowID),
+                  let app = NSRunningApplication(processIdentifier: descriptor.ownerPID)
+            else { return nil }
+            let appElement = AXUIElementCreateApplication(descriptor.ownerPID)
+            guard let axWindow = enumerator.enumerateWindows(forPID: descriptor.ownerPID)
+                .first(where: { axElementWindowID($0) == windowID })
+            else { return nil }
+            return captureAXWindow(
+                axWindow,
+                windowID: windowID,
+                descriptor: descriptor,
+                app: app,
+                appElement: appElement
+            )
+        }
+        return capture ?? nil
+    }
+
     private func captureAXWindow(
         _ axWindow: AXUIElement,
         windowID: CGWindowID,

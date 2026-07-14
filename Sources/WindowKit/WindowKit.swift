@@ -500,7 +500,10 @@ public final class WindowKit {
     }
 
     public func window(withID id: CGWindowID) async -> CapturedWindow? {
-        tracker.repository.readCache(windowID: id)
+        if let cached = tracker.repository.readCache(windowID: id) {
+            return cached
+        }
+        return await tracker.discovery.captureWindow(withID: id)
     }
 
     public func managedDisplays() throws -> [ManagedDisplay] {

@@ -302,6 +302,17 @@ public func cgWindowDescriptors(forPID pid: pid_t) -> [CGWindowDescriptor] {
     }
 }
 
+public func cgWindowDescriptor(forWindowID id: CGWindowID) -> CGWindowDescriptor? {
+    guard let windowList = CGWindowListCopyWindowInfo([.excludeDesktopElements], kCGNullWindowID) as? [[String: AnyObject]] else {
+        return nil
+    }
+    for dict in windowList {
+        guard let descriptor = CGWindowDescriptor(from: dict), descriptor.windowID == id else { continue }
+        return descriptor
+    }
+    return nil
+}
+
 // MARK: - SkyLight Space Management
 
 func slsCreateSpace(_ connection: CGSConnectionID) -> CGSSpaceID? {
