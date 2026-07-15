@@ -53,11 +53,8 @@ final class OrphanedWindowTracker: @unchecked Sendable {
     private var firstSeenOrder: [CGWindowID: Int] = [:]
     private var seenCounter = 0
 
-    // Dock AX observer. `observer`/`dockApp` mutated on main (start/stop/re-register).
-    private var observer: AXObserver?
-    private var dockApp: AXUIElement?
-    private var dockPID: pid_t = 0
-    private var workspaceObservers: [NSObjectProtocol] = []
+    // Shared Dock AX observer; fires `scheduleRebuild` on item add/remove.
+    private let dockObserver = DockAXObserver()
 
     init() {}
     deinit { stop() }
@@ -68,8 +65,8 @@ final class OrphanedWindowTracker: @unchecked Sendable {
         guard !isActive.withLock({ $0 }) else { return }
         isActive.withLock { $0 = true }
         Logger.info("Starting native-dock minimized window tracking")
-        registerDockObserver()
-        startWorkspaceObservers()
+        dockObserver.onChange = { [weak self] in self?.scheduleRebuild() }
+        dockObserver.start()
         scheduleRebuild()
     }
 
@@ -77,8 +74,7 @@ final class OrphanedWindowTracker: @unchecked Sendable {
         guard isActive.withLock({ $0 }) else { return }
         isActive.withLock { $0 = false }
         Logger.info("Stopping native-dock minimized window tracking")
-        tearDownDockObserver()
-        stopWorkspaceObservers()
+        dockObserver.stop()
         itemElements.withLock { $0 = [:] }
         queue.async { [weak self] in
             guard let self else { return }
@@ -109,66 +105,6 @@ final class OrphanedWindowTracker: @unchecked Sendable {
             self.suppressedIDs.insert(id)
             self.rebuild()
         }
-    }
-
-    // MARK: Dock observer
-
-    private func registerDockObserver() {
-        tearDownDockObserver()
-        guard let dock = NSWorkspace.shared.runningApplications.first(where: {
-            $0.bundleIdentifier == "com.apple.dock"
-        }) else { return }
-        dockPID = dock.processIdentifier
-        let app = AXUIElementCreateApplication(dockPID)
-        dockApp = app
-
-        var newObserver: AXObserver?
-        let context = Unmanaged.passUnretained(self).toOpaque()
-        guard AXObserverCreate(dockPID, Self.observerCallback, &newObserver) == .success,
-              let newObserver else { return }
-        observer = newObserver
-        for notification in [kAXCreatedNotification, kAXUIElementDestroyedNotification] {
-            AXObserverAddNotification(newObserver, app, notification as CFString, context)
-        }
-        CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(newObserver), .defaultMode)
-    }
-
-    private func tearDownDockObserver() {
-        guard let observer else { return }
-        CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
-        if let dockApp {
-            for notification in [kAXCreatedNotification, kAXUIElementDestroyedNotification] {
-                AXObserverRemoveNotification(observer, dockApp, notification as CFString)
-            }
-        }
-        self.observer = nil
-        dockApp = nil
-    }
-
-    private static let observerCallback: AXObserverCallback = { _, _, _, refcon in
-        guard let refcon else { return }
-        let tracker = Unmanaged<OrphanedWindowTracker>.fromOpaque(refcon).takeUnretainedValue()
-        tracker.scheduleRebuild()
-    }
-
-    private func startWorkspaceObservers() {
-        let center = NSWorkspace.shared.notificationCenter
-        let relaunch: (Notification) -> Void = { [weak self] note in
-            guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-                  app.bundleIdentifier == "com.apple.dock", let self else { return }
-            self.registerDockObserver()
-            self.scheduleRebuild()
-        }
-        workspaceObservers.append(center.addObserver(
-            forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main, using: relaunch))
-        workspaceObservers.append(center.addObserver(
-            forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main, using: relaunch))
-    }
-
-    private func stopWorkspaceObservers() {
-        let center = NSWorkspace.shared.notificationCenter
-        workspaceObservers.forEach { center.removeObserver($0) }
-        workspaceObservers.removeAll()
     }
 
     // MARK: Rebuild (queue only)
@@ -271,21 +207,11 @@ final class OrphanedWindowTracker: @unchecked Sendable {
     private struct DockItem { let element: AXUIElement; let title: String }
 
     private func dockMinimizedItems() -> [DockItem] {
-        guard let list = dockItemList(),
-              let children = axCopy(list, kAXChildrenAttribute) as? [AXUIElement] else { return [] }
+        guard let list = dockObserver.dockItemList(),
+              let children = DockAXObserver.axCopy(list, kAXChildrenAttribute) as? [AXUIElement] else { return [] }
         return children
-            .filter { axString($0, kAXSubroleAttribute) == "AXMinimizedWindowDockItem" }
-            .map { DockItem(element: $0, title: axString($0, kAXTitleAttribute) ?? "") }
-    }
-
-    private func dockItemList() -> AXUIElement? {
-        let app = AXUIElementCreateApplication(dockPID == 0 ? currentDockPID() : dockPID)
-        guard let children = axCopy(app, kAXChildrenAttribute) as? [AXUIElement] else { return nil }
-        return children.first { axString($0, kAXRoleAttribute) == (kAXListRole as String) }
-    }
-
-    private func currentDockPID() -> pid_t {
-        NSWorkspace.shared.runningApplications.first { $0.bundleIdentifier == "com.apple.dock" }?.processIdentifier ?? 0
+            .filter { DockAXObserver.axString($0, kAXSubroleAttribute) == "AXMinimizedWindowDockItem" }
+            .map { DockItem(element: $0, title: DockAXObserver.axString($0, kAXTitleAttribute) ?? "") }
     }
 
     /// Titles -> candidate (window id, owner pid) for every minimized window. No
@@ -304,14 +230,5 @@ final class OrphanedWindowTracker: @unchecked Sendable {
             map[title, default: []].append((windowID, pid))
         }
         return map
-    }
-
-    private func axCopy(_ element: AXUIElement, _ attribute: String) -> CFTypeRef? {
-        var value: CFTypeRef?
-        return AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success ? value : nil
-    }
-
-    private func axString(_ element: AXUIElement, _ attribute: String) -> String? {
-        axCopy(element, attribute) as? String
     }
 }

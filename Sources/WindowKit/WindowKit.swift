@@ -274,6 +274,24 @@ public final class WindowKit {
         }
     }
 
+    /// Handoff activities the native macOS Dock advertises (`AXHandoffDockItem`),
+    /// sourced from the same Dock accessibility observer as the minimized-window
+    /// set. Each entry carries the advertising app's name and the source device's
+    /// status label. Observable for SwiftUI.
+    public private(set) var handoffItems: [DockHandoffItem] = []
+
+    /// Opt-in toggle for the Handoff subsystem (default `true`).
+    public var tracksHandoff: Bool = true {
+        didSet {
+            guard oldValue != tracksHandoff, isTrackingActive else { return }
+            if tracksHandoff {
+                dockHandoffTracker.start()
+            } else {
+                dockHandoffTracker.stop()
+            }
+        }
+    }
+
     /// The item currently highlighted in the macOS system Cmd+Tab switcher, or `nil` when
     /// the switcher is closed. Pure observation of the Dock's accessibility tree — WindowKit
     /// does not intercept the keypress. Observable for SwiftUI. See also `processSwitcherEvents`.
@@ -343,6 +361,7 @@ public final class WindowKit {
 
     private let tracker: WindowTracker
     private let orphanedWindowTracker = OrphanedWindowTracker()
+    private let dockHandoffTracker = DockHandoffTracker()
     private let appSwitcherObserver = AppSwitcherObserver()
     private var isTrackingActive = false
     private let badgeStore = DockBadgeStore()
@@ -438,6 +457,13 @@ public final class WindowKit {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] windows in
                 self?.orphanedMinimizedWindows = windows
+            }
+            .store(in: &cancellables)
+
+        dockHandoffTracker.itemsPublisher
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] items in
+                self?.handoffItems = items
             }
             .store(in: &cancellables)
 
@@ -625,6 +651,9 @@ public final class WindowKit {
         if tracksOrphanedMinimizedWindows {
             orphanedWindowTracker.start()
         }
+        if tracksHandoff {
+            dockHandoffTracker.start()
+        }
         if tracksProcessSwitcher {
             appSwitcherObserver.start()
         }
@@ -634,6 +663,7 @@ public final class WindowKit {
         isTrackingActive = false
         stopBadgePolling()
         orphanedWindowTracker.stop()
+        dockHandoffTracker.stop()
         appSwitcherObserver.stop()
         tracker.stopTracking()
     }
@@ -649,6 +679,18 @@ public final class WindowKit {
     /// `DockMinimizedWindow.id`. No-op if the window is no longer minimized.
     public func restoreOrphanedMinimizedWindow(id: String) {
         orphanedWindowTracker.restore(id: id)
+    }
+
+    /// Forces an immediate rebuild of the Handoff set. No-op when the subsystem
+    /// is not active.
+    public func refreshHandoffItems() async {
+        dockHandoffTracker.refreshNow()
+    }
+
+    /// Resumes a Handoff activity by pressing its native Dock item (`AXPress`).
+    /// `id` is a `DockHandoffItem.id`. No-op if the activity is no longer offered.
+    public func activateHandoff(id: String) {
+        dockHandoffTracker.activate(id: id)
     }
 
     /// Starts a repeating polling timer for dock badge state at `badgePollInterval`.
