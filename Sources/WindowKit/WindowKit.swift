@@ -633,6 +633,15 @@ public final class WindowKit {
         await tracker.refreshApplication(application)
     }
 
+    /// Live-probes `AXMinimized` for each of the app's tracked windows and
+    /// heals cached state where it disagrees, returning the reconciled
+    /// windows. Use before minimize/restore decisions: Stage Manager does not
+    /// reliably deliver miniaturize AX notifications, so cached flags can lag
+    /// reality.
+    public func reconcileMinimizedState(for application: NSRunningApplication) async -> [CapturedWindow] {
+        await tracker.reconcileMinimizedState(for: application.processIdentifier)
+    }
+
     /// Refreshes stale previews for the app's cached windows without a full AX
     /// rediscovery. Cheap enough to call per sibling process of a multi-instance
     /// bundle (one process per document window), whose caches are already kept

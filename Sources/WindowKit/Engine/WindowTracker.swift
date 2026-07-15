@@ -263,6 +263,56 @@ public final class WindowTracker {
         return Array(repository.readCache(forPID: pid))
     }
 
+    /// Re-reads `AXMinimized` for each cached window of `pid` and updates the
+    /// repository where the live value disagrees, returning the reconciled
+    /// windows. Some system configurations (notably Stage Manager) do not
+    /// reliably deliver miniaturize/deminiaturize AX notifications, so the
+    /// event-driven minimized state can go stale; call this before decisions
+    /// that depend on the current minimized state.
+    public func reconcileMinimizedState(for pid: pid_t) async -> [CapturedWindow] {
+        let cached = repository.readCache(forPID: pid)
+        guard !cached.isEmpty else { return cached }
+
+        let liveByID: [CGWindowID: Bool] = await withCheckedContinuation { continuation in
+            axQueue.async {
+                var live = [CGWindowID: Bool]()
+                for window in cached {
+                    if let isMinimized = try? window.axElement.isMinimized() {
+                        live[window.id] = isMinimized
+                    }
+                }
+                continuation.resume(returning: live)
+            }
+        }
+
+        let staleCount = cached.count { window in
+            liveByID[window.id].map { $0 != window.isMinimized } ?? false
+        }
+        guard staleCount > 0 else { return cached }
+
+        let changes = repository.modify(forPID: pid) { windows in
+            windows = Set(windows.map { window in
+                guard let liveValue = liveByID[window.id], liveValue != window.isMinimized else { return window }
+                var updated = CapturedWindow(
+                    id: window.id, title: window.title, ownerBundleID: window.ownerBundleID,
+                    ownerPID: window.ownerPID, bounds: window.bounds,
+                    isMinimized: liveValue, isFullscreen: window.isFullscreen,
+                    isOwnerHidden: window.isOwnerHidden, isVisible: window.isVisible,
+                    owningDisplayID: window.owningDisplayID, desktopSpace: window.desktopSpace,
+                    lastInteractionTime: window.lastInteractionTime, creationTime: window.creationTime,
+                    axElement: window.axElement, appAxElement: window.appAxElement,
+                    closeButton: window.closeButton, subrole: window.subrole
+                )
+                updated.cachedPreview = window.cachedPreview
+                updated.previewTimestamp = window.previewTimestamp
+                return updated
+            })
+        }
+        emitChanges(changes)
+        Logger.debug("Reconciled minimized state", details: "pid=\(pid), corrected=\(staleCount)")
+        return repository.readCache(forPID: pid)
+    }
+
     /// Explicit refresh: rediscover and validate windows, then capture stale previews.
     public func refreshApplication(_ app: NSRunningApplication) async {
         _ = await trackApplication(app)
