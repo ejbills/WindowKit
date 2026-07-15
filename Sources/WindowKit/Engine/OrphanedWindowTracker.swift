@@ -29,8 +29,12 @@ final class OrphanedWindowTracker: @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.windowkit.dockMinimized", qos: .userInitiated)
     private var screenshotService = ScreenshotService()
 
-    var previewMaxPixelDimension: CGFloat? {
-        didSet { screenshotService.maxPixelDimension = previewMaxPixelDimension }
+    var previewCaptureQuality: WindowCaptureQuality = .nominal {
+        didSet { screenshotService.captureQuality = previewCaptureQuality }
+    }
+
+    var previewResolutionScale: Int = 1 {
+        didSet { screenshotService.downsampleFactor = previewResolutionScale }
     }
 
     var windowsPublisher: AnyPublisher<[DockMinimizedWindow], Never> { subject.eraseToAnyPublisher() }

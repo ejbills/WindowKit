@@ -7,15 +7,23 @@ public enum ScreenshotError: Error, Sendable {
     case timeout
 }
 
+/// Resolution a window capture is taken at. `.nominal` captures at 1x point
+/// resolution (half the linear pixels of a Retina backing — cheaper to cache and
+/// composite); `.best` captures at the window's full backing resolution.
+public enum WindowCaptureQuality: String, CaseIterable, Sendable {
+    case nominal
+    case best
+}
+
 public struct ScreenshotService: Sendable {
     var headless: Bool = false
 
-    /// When set, captured images whose longest edge exceeds this many pixels are
-    /// redrawn into an 8-bit sRGB bitmap at the capped size before being returned.
-    /// A raw `CGSHWCaptureWindowList` capture is a full-Retina-resolution deep-color
-    /// bitmap (~24MB for a 14" window); a client rendering ~500pt preview cards
-    /// needs a small fraction of that.
-    var maxPixelDimension: CGFloat?
+    var captureQuality: WindowCaptureQuality = .nominal
+
+    /// Integer divisor applied to captured image dimensions before returning
+    /// (1 = keep capture resolution). Downscaled captures — and 1:1 deep-color
+    /// captures — are redrawn into an 8-bit bitmap to halve their resident cost.
+    var downsampleFactor: Int = 1
 
     public init() {}
 
@@ -27,7 +35,8 @@ public struct ScreenshotService: Sendable {
         let connection = cgsMainConnection()
         var windowIDValue = UInt32(windowID)
 
-        let options: CaptureOptions = [.ignoreClipping, .efficientResolution]
+        let resolutionOption: CaptureOptions = captureQuality == .best ? .fullResolution : .efficientResolution
+        let options: CaptureOptions = [.ignoreClipping, resolutionOption]
 
         guard let images = CGSHWCaptureWindowList(
             connection,
@@ -39,7 +48,7 @@ public struct ScreenshotService: Sendable {
             throw ScreenshotError.captureFailure
         }
 
-        if let cap = maxPixelDimension, let scaled = Self.downsampled(image, maxDimension: cap) {
+        if let scaled = Self.downsampled(image, factor: downsampleFactor) {
             return scaled
         }
         Self.cgImageSetCachingFlags?(image, Self.kCGImageCachingTransient)
@@ -57,21 +66,16 @@ public struct ScreenshotService: Sendable {
     /// kCGImageCachingTemporary = 3 (the default). 0 is not a defined flag value.
     private static let kCGImageCachingTransient: UInt32 = 1
 
-    static func downsampled(_ image: CGImage, maxDimension: CGFloat) -> CGImage? {
-        let width = CGFloat(image.width)
-        let height = CGFloat(image.height)
-        let longest = max(width, height)
-        guard longest > 0 else { return nil }
-
-        let scale = min(1, maxDimension / longest)
+    static func downsampled(_ image: CGImage, factor: Int) -> CGImage? {
+        let divisor = max(1, factor)
         // Deep-color captures (16 bits/channel) are redrawn even at 1:1 so the
         // retained bitmap is 8-bit — half the resident cost for identical preview output.
-        guard scale < 1 || image.bitsPerComponent > 8 else { return nil }
+        guard divisor > 1 || image.bitsPerComponent > 8 else { return nil }
 
         cgImageSetCachingFlags?(image, kCGImageCachingTransient)
 
-        let targetWidth = max(1, Int(width * scale))
-        let targetHeight = max(1, Int(height * scale))
+        let targetWidth = max(1, image.width / divisor)
+        let targetHeight = max(1, image.height / divisor)
         let colorSpace = image.colorSpace.flatMap { $0.model == .rgb ? $0 : nil }
             ?? CGColorSpace(name: CGColorSpace.sRGB)!
 

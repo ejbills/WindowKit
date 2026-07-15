@@ -209,15 +209,24 @@ public final class WindowKit {
         set { tracker.repository.previewCacheDuration = newValue }
     }
 
-    /// Caps the pixel size of window-preview captures. When set, any capture whose
-    /// longest edge exceeds this value is downsampled to it (and flattened to 8-bit)
-    /// before being cached. Raw captures are full-Retina deep-color bitmaps
-    /// (~24MB per 14" window); a client that renders preview cards should set this
-    /// to roughly twice its card size in pixels.
-    public var previewMaxPixelDimension: CGFloat? {
+    /// Resolution window-preview captures are taken at. `.nominal` (the default)
+    /// captures at 1x point resolution — half the linear pixels of a Retina backing,
+    /// so cached previews cost a quarter of the memory. `.best` captures at the
+    /// window's full backing resolution.
+    public var previewCaptureQuality: WindowCaptureQuality = .nominal {
         didSet {
-            tracker.previewMaxPixelDimension = previewMaxPixelDimension
-            orphanedWindowTracker.previewMaxPixelDimension = previewMaxPixelDimension
+            tracker.previewCaptureQuality = previewCaptureQuality
+            orphanedWindowTracker.previewCaptureQuality = previewCaptureQuality
+        }
+    }
+
+    /// Integer divisor applied to preview capture dimensions before caching
+    /// (1 = keep capture resolution). Downscaled captures — and deep-color captures —
+    /// are flattened to 8-bit before being cached.
+    public var previewResolutionScale: Int = 1 {
+        didSet {
+            tracker.previewResolutionScale = previewResolutionScale
+            orphanedWindowTracker.previewResolutionScale = previewResolutionScale
         }
     }
 

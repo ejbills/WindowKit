@@ -16,8 +16,12 @@ public final class WindowTracker {
         didSet { discovery.screenshotService.headless = headless }
     }
 
-    var previewMaxPixelDimension: CGFloat? {
-        didSet { discovery.screenshotService.maxPixelDimension = previewMaxPixelDimension }
+    var previewCaptureQuality: WindowCaptureQuality = .nominal {
+        didSet { discovery.screenshotService.captureQuality = previewCaptureQuality }
+    }
+
+    var previewResolutionScale: Int = 1 {
+        didSet { discovery.screenshotService.downsampleFactor = previewResolutionScale }
     }
 
     var discovery: WindowDiscovery
