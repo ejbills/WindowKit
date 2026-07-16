@@ -1,14 +1,14 @@
 import AppKit
 import ApplicationServices
-import Combine
 import os
 
 /// Observes the native macOS Dock's accessibility tree for item add/remove and
 /// fires `onChange` (no polling). Re-registers when the Dock process relaunches,
-/// driven off WindowKit's existing `ProcessEvent` stream rather than its own
-/// workspace observers. Shared by every tracker that mirrors a class of native
-/// Dock item (`OrphanedWindowTracker`, `DockHandoffTracker`); each supplies its
-/// own coalescing and item filtering.
+/// detected by watching `NSWorkspace.runningApplications` for a Dock pid change
+/// (WindowKit's `ProcessEvent` stream can't drive this: it only emits launches
+/// for `.regular` apps, and the Dock is a UIElement process). Shared by every
+/// tracker that mirrors a class of native Dock item (`OrphanedWindowTracker`,
+/// `DockHandoffTracker`); each supplies its own coalescing and item filtering.
 ///
 /// Lifecycle (`start`/`stop`) is driven on the main run loop; the accessibility
 /// read helpers are thread-safe and may be called from a tracker's work queue.
@@ -18,23 +18,25 @@ final class DockAXObserver: @unchecked Sendable {
 
     private var observer: AXObserver?
     private var dockApp: AXUIElement?
-    private var lifecycleCancellable: AnyCancellable?
+    private var runningAppsObservation: NSKeyValueObservation?
     // Written on main (register), read off the work queue (item reads).
     private let pid = OSAllocatedUnfairLock<pid_t>(initialState: 0)
+    // Pid the AX observer is successfully bound to (0 when unbound). Main only.
+    private var boundPID: pid_t = 0
+    private var rebindRetriesRemaining = 0
 
     /// The Dock's current process id, or 0 when it isn't running.
     var dockPID: pid_t { pid.withLock { $0 } }
 
-    /// - Parameter processEvents: WindowKit's app-lifecycle stream, used to
-    ///   rebind the AX observer when the Dock relaunches under a new pid.
-    func start(processEvents: AnyPublisher<ProcessEvent, Never>?) {
+    func start() {
         registerDockObserver()
-        observeDockRelaunch(processEvents)
+        observeDockPIDChanges()
     }
 
     func stop() {
         tearDownDockObserver()
-        lifecycleCancellable = nil
+        runningAppsObservation?.invalidate()
+        runningAppsObservation = nil
     }
 
     // MARK: Observer
@@ -54,13 +56,22 @@ final class DockAXObserver: @unchecked Sendable {
         guard AXObserverCreate(dockPID, Self.observerCallback, &newObserver) == .success,
               let newObserver else { return }
         observer = newObserver
+        var registered = true
         for notification in [kAXCreatedNotification, kAXUIElementDestroyedNotification] {
-            AXObserverAddNotification(newObserver, app, notification as CFString, context)
+            if AXObserverAddNotification(newObserver, app, notification as CFString, context) != .success {
+                registered = false
+            }
+        }
+        guard registered else {
+            tearDownDockObserver()
+            return
         }
         CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(newObserver), .defaultMode)
+        boundPID = dockPID
     }
 
     private func tearDownDockObserver() {
+        boundPID = 0
         guard let observer else { return }
         CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
         if let dockApp {
@@ -79,19 +90,32 @@ final class DockAXObserver: @unchecked Sendable {
     }
 
     /// The AX observer binds to a specific pid, so a Dock relaunch would leave it
-    /// attached to a dead process. Rebind on the Dock's launch/terminate events
-    /// from the shared `ProcessEvent` stream (delivered on the main run loop).
-    private func observeDockRelaunch(_ processEvents: AnyPublisher<ProcessEvent, Never>?) {
-        lifecycleCancellable = processEvents?.sink { [weak self] event in
-            guard let self else { return }
-            switch event {
-            case let .applicationLaunched(app) where app.bundleIdentifier == "com.apple.dock":
-                self.registerDockObserver()
-                self.onChange?()
-            case let .applicationTerminated(pid) where pid == self.dockPID:
-                self.tearDownDockObserver()
-            default:
-                break
+    /// attached to a dead process. Watches workspace membership and rebinds when
+    /// the Dock's pid changes, retrying briefly when the fresh Dock's AX server
+    /// isn't accepting registrations yet.
+    private func observeDockPIDChanges() {
+        runningAppsObservation?.invalidate()
+        runningAppsObservation = NSWorkspace.shared.observe(\.runningApplications) { [weak self] _, _ in
+            DispatchQueue.main.async {
+                self?.rebindRetriesRemaining = 5
+                self?.rebindIfDockPIDChanged()
+            }
+        }
+        rebindRetriesRemaining = 5
+        rebindIfDockPIDChanged()
+    }
+
+    private func rebindIfDockPIDChanged() {
+        guard runningAppsObservation != nil else { return }
+        let current = currentDockPID()
+        guard current != 0, current != boundPID else { return }
+        registerDockObserver()
+        if boundPID == current {
+            onChange?()
+        } else if rebindRetriesRemaining > 0 {
+            rebindRetriesRemaining -= 1
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                self?.rebindIfDockPIDChanged()
             }
         }
     }

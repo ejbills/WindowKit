@@ -54,7 +54,19 @@ public final class SystemPermissions: ObservableObject, @unchecked Sendable {
     }
 
     public static func hasAccessibility() -> Bool { checkAccessibility() }
-    public static func hasScreenRecording() -> Bool { headless ? false : cachedScreenRecording }
+
+    /// Positive results are cached; a cached negative is re-checked on every call.
+    /// CGPreflightScreenCaptureAccess can report false transiently right after
+    /// process launch even when the permission is granted, and trusting that
+    /// snapshot for the process lifetime disables every capture path until a
+    /// manual `refresh()`.
+    public static func hasScreenRecording() -> Bool {
+        if headless { return false }
+        if cachedScreenRecording { return true }
+        let fresh = checkScreenRecordingQuiet()
+        if fresh { cachedScreenRecording = true }
+        return fresh
+    }
 
     public func requestAccessibility() {
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary

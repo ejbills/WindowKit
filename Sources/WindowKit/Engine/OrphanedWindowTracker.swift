@@ -26,6 +26,15 @@ public struct DockMinimizedWindow: Identifiable, Equatable {
 final class OrphanedWindowTracker: @unchecked Sendable {
     /// Wait out the minimize animation before capturing the thumbnail.
     static let captureSettleDelay: TimeInterval = 0.6
+    /// Backoff delays for re-attempting a failed thumbnail capture. Captures can
+    /// fail transiently right after process launch (permission preflight, window
+    /// server warm-up); without a retry the tile never surfaces, because rebuilds
+    /// are AX-notification-driven and a static minimized window produces none.
+    static let captureRetryDelays: [TimeInterval] = [1.0, 3.0]
+    /// Extra rebuilds after `start()` to recover from a transiently failed or
+    /// empty initial read (launch races, Dock still rebuilding its AX tree).
+    /// Publishing is change-gated, so these are no-ops when the first read stuck.
+    static let startSettleRebuildDelays: [TimeInterval] = [2.0, 8.0]
     private let queue = DispatchQueue(label: "com.windowkit.dockMinimized", qos: .userInitiated)
     private var screenshotService = ScreenshotService()
 
@@ -61,13 +70,19 @@ final class OrphanedWindowTracker: @unchecked Sendable {
 
     // MARK: Lifecycle
 
-    func start(processEvents: AnyPublisher<ProcessEvent, Never>?) {
+    func start() {
         guard !isActive.withLock({ $0 }) else { return }
         isActive.withLock { $0 = true }
         Logger.info("Starting native-dock minimized window tracking")
         dockObserver.onChange = { [weak self] in self?.scheduleRebuild() }
-        dockObserver.start(processEvents: processEvents)
+        dockObserver.start()
         scheduleRebuild()
+        for delay in Self.startSettleRebuildDelays {
+            queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self, self.isActive.withLock({ $0 }) else { return }
+                self.rebuild()
+            }
+        }
     }
 
     func stop() {
@@ -181,17 +196,21 @@ final class OrphanedWindowTracker: @unchecked Sendable {
     }
 
     /// Captures the thumbnail once the genie animation has settled, then rebuilds to
-    /// republish with the image. One-shot per window.
-    private func scheduleCapture(_ windowID: CGWindowID) {
+    /// republish with the image. Failed captures retry on `captureRetryDelays`
+    /// backoff; after the chain exhausts, the next rebuild starts a fresh chain.
+    private func scheduleCapture(_ windowID: CGWindowID, attempt: Int = 0) {
         guard !scheduledCaptures.contains(windowID) else { return }
         scheduledCaptures.insert(windowID)
-        queue.asyncAfter(deadline: .now() + Self.captureSettleDelay) { [weak self] in
+        let delay = attempt == 0 ? Self.captureSettleDelay : Self.captureRetryDelays[attempt - 1]
+        queue.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self, self.isActive.withLock({ $0 }) else { return }
             self.scheduledCaptures.remove(windowID)
-            if self.previewCache[windowID] == nil,
-               let image = try? self.screenshotService.captureWindow(id: windowID) {
+            guard self.previewCache[windowID] == nil else { return }
+            if let image = try? self.screenshotService.captureWindow(id: windowID) {
                 self.previewCache[windowID] = image
                 self.rebuild()
+            } else if attempt < Self.captureRetryDelays.count {
+                self.scheduleCapture(windowID, attempt: attempt + 1)
             }
         }
     }

@@ -267,7 +267,7 @@ public final class WindowKit {
         didSet {
             guard oldValue != tracksOrphanedMinimizedWindows, isTrackingActive else { return }
             if tracksOrphanedMinimizedWindows {
-                orphanedWindowTracker.start(processEvents: tracker.processEvents)
+                orphanedWindowTracker.start()
             } else {
                 orphanedWindowTracker.stop()
             }
@@ -285,7 +285,7 @@ public final class WindowKit {
         didSet {
             guard oldValue != tracksHandoff, isTrackingActive else { return }
             if tracksHandoff {
-                dockHandoffTracker.start(processEvents: tracker.processEvents)
+                dockHandoffTracker.start()
             } else {
                 dockHandoffTracker.stop()
             }
@@ -658,10 +658,10 @@ public final class WindowKit {
         isTrackingActive = true
         tracker.startTracking()
         if tracksOrphanedMinimizedWindows {
-            orphanedWindowTracker.start(processEvents: tracker.processEvents)
+            orphanedWindowTracker.start()
         }
         if tracksHandoff {
-            dockHandoffTracker.start(processEvents: tracker.processEvents)
+            dockHandoffTracker.start()
         }
         if tracksProcessSwitcher {
             appSwitcherObserver.start()

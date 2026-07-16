@@ -45,12 +45,12 @@ final class DockHandoffTracker: @unchecked Sendable {
 
     // MARK: Lifecycle
 
-    func start(processEvents: AnyPublisher<ProcessEvent, Never>?) {
+    func start() {
         guard !isActive.withLock({ $0 }) else { return }
         isActive.withLock { $0 = true }
         Logger.info("Starting native-dock handoff tracking")
         dockObserver.onChange = { [weak self] in self?.scheduleRebuild() }
-        dockObserver.start(processEvents: processEvents)
+        dockObserver.start()
         scheduleRebuild()
     }
 
