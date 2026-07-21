@@ -107,6 +107,7 @@ final class DockAXObserver: @unchecked Sendable {
 
     private func rebindIfDockPIDChanged() {
         guard runningAppsObservation != nil else { return }
+        if boundPID != 0, kill(boundPID, 0) == 0 { return }
         let current = currentDockPID()
         guard current != 0, current != boundPID else { return }
         registerDockObserver()
@@ -132,7 +133,7 @@ final class DockAXObserver: @unchecked Sendable {
     }
 
     private func currentDockPID() -> pid_t {
-        NSWorkspace.shared.runningApplications.first { $0.bundleIdentifier == "com.apple.dock" }?.processIdentifier ?? 0
+        NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first?.processIdentifier ?? 0
     }
 
     static func axCopy(_ element: AXUIElement, _ attribute: String) -> CFTypeRef? {

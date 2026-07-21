@@ -17,6 +17,7 @@ public final class ProcessWatcher {
     private var knownPIDs: Set<pid_t> = []
     private var runningAppsObservation: NSKeyValueObservation?
     private var pendingPolicyObservations: [pid_t: PolicyObservation] = [:]
+    private var pidsByIdentity: [ObjectIdentifier: (app: NSRunningApplication, pid: pid_t)] = [:]
 
     private struct PolicyObservation {
         let app: NSRunningApplication
@@ -57,6 +58,7 @@ public final class ProcessWatcher {
         runningAppsObservation = nil
         pendingPolicyObservations.values.forEach { $0.invalidate() }
         pendingPolicyObservations.removeAll()
+        pidsByIdentity.removeAll()
     }
 
     public func runningApplications() -> [NSRunningApplication] {
@@ -71,10 +73,20 @@ public final class ProcessWatcher {
     /// is .regular gets a per-app activationPolicy observation until it flips.
     private func reconcileRunningApps() {
         let current = NSWorkspace.shared.runningApplications
-        let currentPIDs = Set(current.map(\.processIdentifier))
+        var currentPIDs = Set<pid_t>(minimumCapacity: current.count)
+        var currentIdentities = Set<ObjectIdentifier>(minimumCapacity: current.count)
 
         for app in current {
+            let identity = ObjectIdentifier(app)
+            currentIdentities.insert(identity)
+            if let cached = pidsByIdentity[identity] {
+                currentPIDs.insert(cached.pid)
+                continue
+            }
+
             let pid = app.processIdentifier
+            pidsByIdentity[identity] = (app, pid)
+            currentPIDs.insert(pid)
             guard !knownPIDs.contains(pid) else { continue }
             if app.activationPolicy == .regular {
                 markLaunched(app)
@@ -83,6 +95,9 @@ public final class ProcessWatcher {
             }
         }
 
+        for identity in pidsByIdentity.keys where !currentIdentities.contains(identity) {
+            pidsByIdentity.removeValue(forKey: identity)
+        }
         for pid in knownPIDs.subtracting(currentPIDs) {
             knownPIDs.remove(pid)
             eventSubject.send(.applicationTerminated(pid))

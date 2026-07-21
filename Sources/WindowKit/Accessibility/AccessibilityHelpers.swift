@@ -166,6 +166,39 @@ public func isAccessibilityReady() -> Bool {
     }
 }
 
+private enum BruteForceGate {
+    struct State {
+        var everFoundExtras = false
+        var lastRun: TimeInterval = 0
+    }
+
+    static let lock = NSLock()
+    nonisolated(unsafe) static var states: [pid_t: State] = [:]
+    static let staleInterval: TimeInterval = 60
+
+    static func shouldRun(pid: pid_t, standardCount: Int, cgEligibleCount: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let state = states[pid] else { return true }
+        if state.everFoundExtras { return true }
+        if standardCount == 0 { return true }
+        if standardCount < cgEligibleCount { return true }
+        return ProcessInfo.processInfo.systemUptime - state.lastRun > staleInterval
+    }
+
+    static func record(pid: pid_t, foundExtras: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        if states.count > 512 {
+            states = states.filter { kill($0.key, 0) == 0 }
+        }
+        var state = states[pid] ?? State()
+        state.everFoundExtras = state.everFoundExtras || foundExtras
+        state.lastRun = ProcessInfo.processInfo.systemUptime
+        states[pid] = state
+    }
+}
+
 extension AXUIElement {
     /// AX enumeration with brute-force fallback for windows AX misses.
     public static func allWindows(forPID pid: pid_t) -> [AXUIElement] {
@@ -177,8 +210,18 @@ extension AXUIElement {
             resultSet.formUnion(windows)
         }
 
-        let bruteForceWindows = enumerateWindowsByBruteForce(pid: pid)
-        resultSet.formUnion(bruteForceWindows)
+        let cgEligibleCount = cgWindowDescriptors(forPID: pid).filter { descriptor in
+            descriptor.layer == 0 && descriptor.alpha > 0.01 &&
+                descriptor.bounds.width >= WindowEnumerator.minimumWindowSize.width &&
+                descriptor.bounds.height >= WindowEnumerator.minimumWindowSize.height
+        }.count
+
+        if BruteForceGate.shouldRun(pid: pid, standardCount: resultSet.count, cgEligibleCount: cgEligibleCount) {
+            let bruteForceWindows = enumerateWindowsByBruteForce(pid: pid)
+            let foundExtras = !Set(bruteForceWindows).subtracting(resultSet).isEmpty
+            BruteForceGate.record(pid: pid, foundExtras: foundExtras)
+            resultSet.formUnion(bruteForceWindows)
+        }
 
         return Array(resultSet)
     }
