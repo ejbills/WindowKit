@@ -64,6 +64,9 @@ public final class WindowTracker {
     // the single post-launch discovery ran.
     private static let lateWindowRescanDelays: [TimeInterval] = [3.0, 8.0]
 
+    private static let spaceScanMinInterval: TimeInterval = 120
+    private let spaceScanState = OSAllocatedUnfairLock(initialState: (lastScan: TimeInterval(0), trailingScheduled: false))
+
     // Destroy burst tapering — escalating debounce per PID
     private static let destroyMinInterval: Duration = .milliseconds(50)
     private static let destroyMaxInterval: Duration = .milliseconds(800)
@@ -393,8 +396,40 @@ public final class WindowTracker {
 
         case .spaceChanged:
             debounce(key: "space-change") { [weak self] in
-                await self?.performFullScan()
+                await self?.performSpaceChangeScan()
             }
+        }
+    }
+
+    private func performSpaceChangeScan() async {
+        let now = ProcessInfo.processInfo.systemUptime
+        let action: (runNow: Bool, scheduleTrailing: Bool) = spaceScanState.withLockUnchecked { state in
+            if now - state.lastScan >= Self.spaceScanMinInterval {
+                state.lastScan = now
+                return (true, false)
+            }
+            if state.trailingScheduled {
+                return (false, false)
+            }
+            state.trailingScheduled = true
+            return (false, true)
+        }
+
+        if action.runNow {
+            await performFullScan()
+            return
+        }
+        Logger.debug("Space-change scan rate-limited", details: "trailing=\(action.scheduleTrailing)")
+        guard action.scheduleTrailing else { return }
+        let delay = Self.spaceScanMinInterval - (now - spaceScanState.withLockUnchecked { $0.lastScan })
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(max(1, delay)))
+            guard let self, self.isTracking else { return }
+            self.spaceScanState.withLockUnchecked { state in
+                state.trailingScheduled = false
+                state.lastScan = ProcessInfo.processInfo.systemUptime
+            }
+            await self.performFullScan()
         }
     }
 

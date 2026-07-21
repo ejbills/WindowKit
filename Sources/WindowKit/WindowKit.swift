@@ -313,6 +313,12 @@ public final class WindowKit {
         appSwitcherObserver.probe()
     }
 
+    /// Ends a running switcher discovery probe early; call on ⌘ release.
+    public func cancelProcessSwitcherProbe() {
+        guard tracksProcessSwitcher else { return }
+        appSwitcherObserver.cancelProbe()
+    }
+
     /// Opt-in toggle for Cmd+Tab switcher observation (default `true`).
     public var tracksProcessSwitcher: Bool = true {
         didSet {

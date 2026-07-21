@@ -43,8 +43,8 @@ final class AppSwitcherObserver: @unchecked Sendable {
     private let isActive = OSAllocatedUnfairLock(initialState: false)
 
     private static let probeInterval: TimeInterval = 0.1
-    private static let probeTickLimit = 20
-    private static let sessionPollInterval: TimeInterval = 0.025
+    private static let probeTickLimit = 8
+    private static let sessionPollInterval: TimeInterval = 0.1
 
     // Touched only on `queue`.
     private var scanScheduled = false
@@ -109,6 +109,14 @@ final class AppSwitcherObserver: @unchecked Sendable {
                 Logger.debug("Switcher discovery probe started (host saw ⌘-Tab)")
                 self.probeTick()
             }
+        }
+    }
+
+    /// Ends a discovery probe early (host saw ⌘ released).
+    func cancelProbe() {
+        queue.async { [weak self] in
+            guard let self, self.probeTicksRemaining > 0 else { return }
+            self.probeTicksRemaining = 0
         }
     }
 
