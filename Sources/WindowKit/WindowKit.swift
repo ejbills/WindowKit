@@ -313,6 +313,11 @@ public final class WindowKit {
         appSwitcherObserver.probe()
     }
 
+    public func isLaunching(_ app: NSRunningApplication) -> Bool {
+        let pid = app.processIdentifier
+        return launchingApplications.contains { $0.processIdentifier == pid }
+    }
+
     /// Ends a running switcher discovery probe early; call on ⌘ release.
     public func cancelProcessSwitcherProbe() {
         guard tracksProcessSwitcher else { return }
@@ -394,6 +399,8 @@ public final class WindowKit {
                     guard !self.launchingApplications.contains(where: { $0.processIdentifier == pid }) else { break }
                     self.launchingApplications.append(app)
                     self.scheduleLaunchTimeout(for: pid)
+                    self.tracker.repository.registerPID(pid)
+                    self.refreshTrackedApplicationsFromRepository()
 
                 case .applicationLaunched(let app):
                     self.tracker.repository.registerPID(app.processIdentifier)

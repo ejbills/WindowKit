@@ -17,6 +17,7 @@ public final class ProcessWatcher {
     private var knownPIDs: Set<pid_t> = []
     private var runningAppsObservation: NSKeyValueObservation?
     private var pendingPolicyObservations: [pid_t: PolicyObservation] = [:]
+    private var pendingFinishObservations: [pid_t: PolicyObservation] = [:]
     private var pidsByIdentity: [ObjectIdentifier: (app: NSRunningApplication, pid: pid_t)] = [:]
 
     private struct PolicyObservation {
@@ -34,6 +35,9 @@ public final class ProcessWatcher {
     /// but only become .regular once they connect to the window server — sometimes
     /// many seconds later, and without any NSWorkspace launch notification.
     private static let policyFlipTimeout: TimeInterval = 120
+
+    /// Backstop for a launching app whose `isFinishedLaunching` never flips.
+    private static let launchFinishTimeout: TimeInterval = 30
 
     public private(set) var frontmostApplication: NSRunningApplication?
 
@@ -58,6 +62,8 @@ public final class ProcessWatcher {
         runningAppsObservation = nil
         pendingPolicyObservations.values.forEach { $0.invalidate() }
         pendingPolicyObservations.removeAll()
+        pendingFinishObservations.values.forEach { $0.invalidate() }
+        pendingFinishObservations.removeAll()
         pidsByIdentity.removeAll()
     }
 
@@ -105,22 +111,41 @@ public final class ProcessWatcher {
         for pid in Set(pendingPolicyObservations.keys).subtracting(currentPIDs) {
             pendingPolicyObservations.removeValue(forKey: pid)?.invalidate()
         }
+        for pid in Set(pendingFinishObservations.keys).subtracting(currentPIDs) {
+            pendingFinishObservations.removeValue(forKey: pid)?.invalidate()
+        }
     }
 
+    /// `.applicationWillLaunch` at membership insertion, `.applicationLaunched`
+    /// when `isFinishedLaunching` flips.
     private func markLaunched(_ app: NSRunningApplication) {
         let pid = app.processIdentifier
         pendingPolicyObservations.removeValue(forKey: pid)?.invalidate()
         guard !knownPIDs.contains(pid) else { return }
         knownPIDs.insert(pid)
-        // Back-door launches never fire willLaunchApplicationNotification, so a
-        // still-starting app gets its launching state here — consumers dedupe by
-        // PID against the notification-driven event. This is the earliest point a
-        // back-door process is provably an app (vs. a background helper), and its
-        // first window can still be seconds away.
-        if !app.isFinishedLaunching {
-            eventSubject.send(.applicationWillLaunch(app))
+
+        guard !app.isFinishedLaunching else {
+            eventSubject.send(.applicationLaunched(app))
+            return
         }
-        eventSubject.send(.applicationLaunched(app))
+
+        eventSubject.send(.applicationWillLaunch(app))
+        let token = app.observe(\.isFinishedLaunching) { [weak self] app, _ in
+            DispatchQueue.main.async {
+                guard let self, app.isFinishedLaunching, !app.isTerminated else { return }
+                guard let pending = self.pendingFinishObservations.removeValue(forKey: pid) else { return }
+                pending.invalidate()
+                self.eventSubject.send(.applicationLaunched(app))
+            }
+        }
+        pendingFinishObservations[pid] = PolicyObservation(app: app, token: token)
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.launchFinishTimeout) { [weak self] in
+            guard let self, let pending = self.pendingFinishObservations.removeValue(forKey: pid) else { return }
+            pending.invalidate()
+            if !pending.app.isTerminated {
+                self.eventSubject.send(.applicationLaunched(pending.app))
+            }
+        }
     }
 
     private func observePolicyFlip(of app: NSRunningApplication) {
@@ -140,33 +165,6 @@ public final class ProcessWatcher {
     private func setupObservers() {
         let center = NSWorkspace.shared.notificationCenter
         knownPIDs = Set(runningApplications().map(\.processIdentifier))
-
-        observations.append(center.addObserver(
-            forName: NSWorkspace.willLaunchApplicationNotification, object: nil, queue: .main
-        ) { [weak self] notification in
-            guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-                  app.activationPolicy == .regular else { return }
-            self?.eventSubject.send(.applicationWillLaunch(app))
-        })
-
-        observations.append(center.addObserver(
-            forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main
-        ) { [weak self] notification in
-            guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-                  app.activationPolicy == .regular else { return }
-            self?.markLaunched(app)
-        })
-
-        observations.append(center.addObserver(
-            forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main
-        ) { [weak self] notification in
-            guard let self,
-                  let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
-            let pid = app.processIdentifier
-            pendingPolicyObservations.removeValue(forKey: pid)?.invalidate()
-            knownPIDs.remove(pid)
-            eventSubject.send(.applicationTerminated(pid))
-        })
 
         observations.append(center.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main

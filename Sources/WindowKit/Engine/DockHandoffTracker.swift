@@ -104,7 +104,8 @@ final class DockHandoffTracker: @unchecked Sendable {
             elements[id] = item.element
         }
 
-        itemElements.withLock { $0 = elements }
+        let resolved = elements
+        itemElements.withLock { $0 = resolved }
         publish(items)
     }
 
