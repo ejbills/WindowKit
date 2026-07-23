@@ -634,7 +634,7 @@ public final class WindowTracker {
         }
 
         switch event {
-        case .windowCreated, .windowDestroyed, .windowFocused, .mainWindowChanged:
+        case .windowCreated, .windowDestroyed:
             eventSubject.send(.windowActivityDetected(pid))
         default:
             break
