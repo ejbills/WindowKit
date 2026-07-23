@@ -8,9 +8,9 @@ public struct CapturedWindow: Identifiable, Hashable, @unchecked Sendable {
     public let ownerBundleID: String?
     public let ownerPID: pid_t
     public let bounds: CGRect
-    public private(set) var isMinimized: Bool
-    public private(set) var isFullscreen: Bool
-    public private(set) var isOwnerHidden: Bool
+    public internal(set) var isMinimized: Bool
+    public internal(set) var isFullscreen: Bool
+    public internal(set) var isOwnerHidden: Bool
     public let isVisible: Bool
     public let owningDisplayID: CGDirectDisplayID?
     public let desktopSpace: Int?

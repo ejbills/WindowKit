@@ -334,6 +334,112 @@ public final class WindowTracker {
         eventSubject.send(.windowChanged(updated))
     }
 
+    /// Minimizes the window and immediately reflects the state in the cache
+    /// (miniaturize notifications are not reliably delivered, e.g. under Stage Manager).
+    public func minimizeWindow(_ window: CapturedWindow) async throws {
+        var target = window
+        try await target.minimize()
+        applyCachedWindowState(windowID: window.id, pid: window.ownerPID) { $0.isMinimized = true }
+    }
+
+    /// Restores the window and immediately reflects the unminimize (and the
+    /// bring-to-front's unhide side effect) in the cache.
+    public func restoreWindow(_ window: CapturedWindow) async throws {
+        var target = window
+        try await target.restore()
+        applyCachedWindowState(windowID: window.id, pid: window.ownerPID) { $0.isMinimized = false }
+        applyCachedOwnerHidden(pid: window.ownerPID, hidden: false)
+    }
+
+    /// Toggles the window's minimized state and immediately reflects it in the cache.
+    @discardableResult
+    public func toggleMinimizeWindow(_ window: CapturedWindow) async throws -> Bool {
+        var target = window
+        let minimized = try await target.toggleMinimize()
+        applyCachedWindowState(windowID: window.id, pid: window.ownerPID) { $0.isMinimized = minimized }
+        if !minimized {
+            applyCachedOwnerHidden(pid: window.ownerPID, hidden: false)
+        }
+        return minimized
+    }
+
+    /// Brings the window to front and immediately reflects the unminimize/unhide
+    /// side effects in the cache.
+    public func focusWindow(_ window: CapturedWindow) async throws {
+        var target = window
+        try await target.bringToFront()
+        applyCachedWindowState(windowID: window.id, pid: window.ownerPID) { $0.isMinimized = false }
+        applyCachedOwnerHidden(pid: window.ownerPID, hidden: false)
+    }
+
+    /// Hides the window's owner application and immediately marks all of its
+    /// cached windows hidden.
+    public func hideWindowOwner(_ window: CapturedWindow) async throws {
+        var target = window
+        try await target.hide()
+        applyCachedOwnerHidden(pid: window.ownerPID, hidden: true)
+    }
+
+    /// Unhides the window's owner application and immediately marks all of its
+    /// cached windows visible.
+    public func unhideWindowOwner(_ window: CapturedWindow) async throws {
+        var target = window
+        try await target.unhide()
+        applyCachedOwnerHidden(pid: window.ownerPID, hidden: false)
+    }
+
+    /// Toggles the owner application's hidden state and immediately reflects it
+    /// across all of its cached windows.
+    @discardableResult
+    public func toggleWindowOwnerHidden(_ window: CapturedWindow) async throws -> Bool {
+        var target = window
+        let hidden = try await target.toggleHidden()
+        applyCachedOwnerHidden(pid: window.ownerPID, hidden: hidden)
+        return hidden
+    }
+
+    /// Enters fullscreen and immediately reflects the state in the cache.
+    public func enterFullScreen(_ window: CapturedWindow) async throws {
+        try await window.enterFullScreen()
+        applyCachedWindowState(windowID: window.id, pid: window.ownerPID) { $0.isFullscreen = true }
+    }
+
+    /// Exits fullscreen and immediately reflects the state in the cache.
+    public func exitFullScreen(_ window: CapturedWindow) async throws {
+        try await window.exitFullScreen()
+        applyCachedWindowState(windowID: window.id, pid: window.ownerPID) { $0.isFullscreen = false }
+    }
+
+    /// Toggles fullscreen and optimistically flips the cached state; discovery
+    /// corrects it if the transition failed.
+    public func toggleFullScreen(_ window: CapturedWindow) async throws {
+        try await window.toggleFullScreen()
+        let flipped = !window.isFullscreen
+        applyCachedWindowState(windowID: window.id, pid: window.ownerPID) { $0.isFullscreen = flipped }
+    }
+
+    private func applyCachedWindowState(windowID: CGWindowID, pid: pid_t, _ mutate: (inout CapturedWindow) -> Void) {
+        let changes = repository.modify(forPID: pid) { windows in
+            guard let existing = windows.first(where: { $0.id == windowID }) else { return }
+            var updated = existing
+            mutate(&updated)
+            windows.remove(existing)
+            windows.insert(updated)
+        }
+        emitChanges(changes)
+    }
+
+    private func applyCachedOwnerHidden(pid: pid_t, hidden: Bool) {
+        let changes = repository.modify(forPID: pid) { windows in
+            windows = Set(windows.map { window in
+                var updated = window
+                updated.isOwnerHidden = hidden
+                return updated
+            })
+        }
+        emitChanges(changes)
+    }
+
     public func capturePreview(for windowID: CGWindowID) async -> CGImage? {
         let screenshotService = discovery.screenshotService
         do {

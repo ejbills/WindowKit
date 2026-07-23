@@ -595,6 +595,60 @@ public final class WindowKit {
         try await tracker.closeWindow(window)
     }
 
+    /// Minimizes the window, updating the cache immediately rather than waiting
+    /// on AX notifications (unreliable under Stage Manager).
+    public func minimizeWindow(_ window: CapturedWindow) async throws {
+        try await tracker.minimizeWindow(window)
+    }
+
+    /// Restores the window, updating the cache immediately.
+    public func restoreWindow(_ window: CapturedWindow) async throws {
+        try await tracker.restoreWindow(window)
+    }
+
+    /// Toggles the window's minimized state, updating the cache immediately.
+    @discardableResult
+    public func toggleMinimizeWindow(_ window: CapturedWindow) async throws -> Bool {
+        try await tracker.toggleMinimizeWindow(window)
+    }
+
+    /// Brings the window to front, reflecting its unminimize/unhide side effects
+    /// in the cache immediately.
+    public func focusWindow(_ window: CapturedWindow) async throws {
+        try await tracker.focusWindow(window)
+    }
+
+    /// Hides the window's owner application, marking all its cached windows hidden.
+    public func hideWindowOwner(_ window: CapturedWindow) async throws {
+        try await tracker.hideWindowOwner(window)
+    }
+
+    /// Unhides the window's owner application, marking all its cached windows visible.
+    public func unhideWindowOwner(_ window: CapturedWindow) async throws {
+        try await tracker.unhideWindowOwner(window)
+    }
+
+    /// Toggles the owner application's hidden state, updating the cache immediately.
+    @discardableResult
+    public func toggleWindowOwnerHidden(_ window: CapturedWindow) async throws -> Bool {
+        try await tracker.toggleWindowOwnerHidden(window)
+    }
+
+    /// Enters fullscreen, updating the cached state immediately.
+    public func enterFullScreen(_ window: CapturedWindow) async throws {
+        try await tracker.enterFullScreen(window)
+    }
+
+    /// Exits fullscreen, updating the cached state immediately.
+    public func exitFullScreen(_ window: CapturedWindow) async throws {
+        try await tracker.exitFullScreen(window)
+    }
+
+    /// Toggles fullscreen, optimistically flipping the cached state.
+    public func toggleFullScreen(_ window: CapturedWindow) async throws {
+        try await tracker.toggleFullScreen(window)
+    }
+
     /// Quits the application owning `window`, then polls until the process is
     /// confirmed dead before purging state. If the app ignores the quit after
     /// `timeout`, state is left intact.
