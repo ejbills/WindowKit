@@ -383,6 +383,11 @@ public enum WindowEvent: Sendable {
     case windowAppeared(CapturedWindow)
     case windowDisappeared(CGWindowID)
     case windowChanged(CapturedWindow)
+    /// Raw AX window-created/destroyed/focus activity for a tracked app, emitted even
+    /// when the affected window never enters tracking (borderless fullscreen windows,
+    /// panels without close/minimize buttons). Lets clients re-derive display-level
+    /// state — e.g. fullscreen presence — that the cached window list cannot express.
+    case windowActivityDetected(pid_t)
     case previewCaptured(CGWindowID, CGImage)
     case notificationBannerChanged
     /// macOS reported that the system woke from sleep.

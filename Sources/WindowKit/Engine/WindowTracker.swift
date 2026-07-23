@@ -634,6 +634,13 @@ public final class WindowTracker {
         }
 
         switch event {
+        case .windowCreated, .windowDestroyed, .windowFocused, .mainWindowChanged:
+            eventSubject.send(.windowActivityDetected(pid))
+        default:
+            break
+        }
+
+        switch event {
         case .windowCreated:
             repository.clearSuppressions(forPID: pid)
             debounce(key: "refresh-\(pid)") { [weak self] in

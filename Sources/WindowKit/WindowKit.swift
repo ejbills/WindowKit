@@ -454,6 +454,8 @@ public final class WindowKit {
                     self.invalidateAppState(forWindowID: id)
                 case .windowChanged(let window):
                     self.invalidateAppState(forPID: window.ownerPID)
+                case .windowActivityDetected:
+                    break
                 case .previewCaptured(let id, _):
                     self.invalidateAppState(forWindowID: id)
                 case .notificationBannerChanged:
