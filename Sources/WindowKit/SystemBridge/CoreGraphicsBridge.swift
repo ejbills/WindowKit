@@ -106,6 +106,14 @@ private typealias SLSSpaceAddWindowsAndRemoveFromSpacesType = @convention(c) (
     CGSConnectionID, CGSSpaceID, CFArray, Int32
 ) -> Void
 
+private typealias SLSAddWindowsToSpacesType = @convention(c) (
+    CGSConnectionID, CFArray, CFArray
+) -> Void
+
+private typealias SLSRemoveWindowsFromSpacesType = @convention(c) (
+    CGSConnectionID, CFArray, CFArray
+) -> Void
+
 /// Copy-rule return must come back as Unmanaged: a `@convention(c)` type
 /// treats a CF class return as +0, so the callee's +1 leaked one spaces
 /// array per call (measured: ~600 leaked space dictionaries per half hour).
@@ -130,6 +138,8 @@ private var spaceCreatePtr: SLSSpaceCreateType?
 private var spaceSetAbsoluteLevelPtr: SLSSpaceSetAbsoluteLevelType?
 private var showSpacesPtr: SLSShowSpacesType?
 private var spaceAddWindowsPtr: SLSSpaceAddWindowsAndRemoveFromSpacesType?
+private var addWindowsToSpacesPtr: SLSAddWindowsToSpacesType?
+private var removeWindowsFromSpacesPtr: SLSRemoveWindowsFromSpacesType?
 private var copyManagedDisplaySpacesPtr: SLSCopyManagedDisplaySpacesType?
 
 private func loadSkyLightFunctions() {
@@ -164,6 +174,14 @@ private func loadSkyLightFunctions() {
 
     if let symbol = dlsym(handle, "SLSSpaceAddWindowsAndRemoveFromSpaces") {
         spaceAddWindowsPtr = unsafeBitCast(symbol, to: SLSSpaceAddWindowsAndRemoveFromSpacesType.self)
+    }
+
+    if let symbol = dlsym(handle, "SLSAddWindowsToSpaces") {
+        addWindowsToSpacesPtr = unsafeBitCast(symbol, to: SLSAddWindowsToSpacesType.self)
+    }
+
+    if let symbol = dlsym(handle, "SLSRemoveWindowsFromSpaces") {
+        removeWindowsFromSpacesPtr = unsafeBitCast(symbol, to: SLSRemoveWindowsFromSpacesType.self)
     }
 
     if let symbol = dlsym(handle, "SLSCopyManagedDisplaySpaces") {
@@ -345,6 +363,33 @@ func slsSpaceAddWindows(
     loadSkyLightFunctions()
     let cfArray = windowIDs.map { NSNumber(value: $0) } as CFArray
     spaceAddWindowsPtr?(connection, spaceID, cfArray, 7)
+}
+
+/// Adds explicit per-Space membership. `windowIDs` are uint32 CGWindowIDs and
+/// `spaceIDs` are uint64 managed-space ids; the CFNumber widths are load-bearing
+/// (malformed payloads can wedge WindowServer).
+func slsAddWindows(
+    _ connection: CGSConnectionID,
+    _ windowIDs: [CGWindowID],
+    toSpaces spaceIDs: [CGSSpaceID]
+) {
+    loadSkyLightFunctions()
+    guard let fn = addWindowsToSpacesPtr, !windowIDs.isEmpty, !spaceIDs.isEmpty else { return }
+    let windows = windowIDs.map { NSNumber(value: UInt32($0)) } as CFArray
+    let spaces = spaceIDs.map { NSNumber(value: UInt64($0)) } as CFArray
+    fn(connection, windows, spaces)
+}
+
+func slsRemoveWindows(
+    _ connection: CGSConnectionID,
+    _ windowIDs: [CGWindowID],
+    fromSpaces spaceIDs: [CGSSpaceID]
+) {
+    loadSkyLightFunctions()
+    guard let fn = removeWindowsFromSpacesPtr, !windowIDs.isEmpty, !spaceIDs.isEmpty else { return }
+    let windows = windowIDs.map { NSNumber(value: UInt32($0)) } as CFArray
+    let spaces = spaceIDs.map { NSNumber(value: UInt64($0)) } as CFArray
+    fn(connection, windows, spaces)
 }
 
 func slsCopyManagedDisplaySpaces(_ connection: CGSConnectionID) -> CFArray? {

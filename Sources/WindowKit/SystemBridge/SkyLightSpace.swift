@@ -103,6 +103,22 @@ public enum WindowSpaces {
         cgsWindowSpaces(CGSMainConnectionID(), windowID).map(CGSSpaceID.init)
     }
 
+    public static func spaces(forWindow windowID: CGWindowID) -> [CGSSpaceID] {
+        cgsWindowSpaces(CGSMainConnectionID(), windowID).map(CGSSpaceID.init)
+    }
+
+    /// Grants the given windows explicit membership in each of `spaceIDs`. A
+    /// window with explicit membership and empty `collectionBehavior` renders
+    /// inside each member Space's scene and slides with the outgoing Space
+    /// during a transition.
+    public static func addWindows(_ windowIDs: [CGWindowID], toSpaces spaceIDs: [CGSSpaceID]) {
+        slsAddWindows(CGSMainConnectionID(), windowIDs, toSpaces: spaceIDs)
+    }
+
+    public static func removeWindows(_ windowIDs: [CGWindowID], fromSpaces spaceIDs: [CGSSpaceID]) {
+        slsRemoveWindows(CGSMainConnectionID(), windowIDs, fromSpaces: spaceIDs)
+    }
+
     public static func move(windowID: CGWindowID, toManagedSpace spaceID: CGSSpaceID) throws {
         try move(windowIDs: [windowID], toManagedSpace: spaceID)
     }
