@@ -141,6 +141,14 @@ public final class SpaceTransitionSignal {
         RunLoop.main.add(timer, forMode: .common)
     }
 
+    /// Synchronous read of whether any managed Space is still mid-translation.
+    /// Lets a consumer's commit-fallback distinguish "transition still animating
+    /// (or finger still holding the swipe) — keep waiting" from "transition
+    /// evaporated without a commit — restore". Read failures report false.
+    public func isTransitionUnderway() -> Bool {
+        isSpaceActuallyTransitioning(assumeTransitioningOnReadFailure: false)
+    }
+
     private func cancelConfirmBurst() {
         confirmTimer?.invalidate()
         confirmTimer = nil
