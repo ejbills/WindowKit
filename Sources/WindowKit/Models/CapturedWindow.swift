@@ -144,12 +144,15 @@ extension CapturedWindow {
             _ = GetProcessForPID(pid, &psn)
             _ = _SLPSSetFrontProcessWithOptions(&psn, wid, SLPSMode.userGenerated.rawValue)
 
-            var bytes = [UInt8](repeating: 0, count: 0xF8)
+            var bytes = [UInt8](repeating: 0, count: 0x100)
             bytes[0x04] = 0xF8
             bytes[0x3A] = 0x10
             var widCopy = UInt32(wid)
             memcpy(&bytes[0x3C], &widCopy, MemoryLayout<UInt32>.size)
-            memset(&bytes[0x20], 0xFF, 0x10)
+            // Click just outside the frame: makes the window key without hit-testing content
+            // (top-left would close Chrome/Brave PWA shims).
+            var clickPoint = CGPoint(x: -1, y: -1)
+            memcpy(&bytes[0x20], &clickPoint, MemoryLayout<CGPoint>.size)
             bytes[0x08] = 0x01
             _ = SLPSPostEventRecordTo(&psn, &bytes)
             bytes[0x08] = 0x02
