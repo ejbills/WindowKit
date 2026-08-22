@@ -361,6 +361,11 @@ public final class WindowKit {
 
     private static let launchTimeoutSeconds: TimeInterval = 30
 
+    /// Grace window after `isFinishedLaunching` flips for a first window to appear
+    /// before a windowless app (agents, menu-bar helpers, terminal tools) stops
+    /// being reported as launching.
+    private static let postLaunchWindowGraceSeconds: TimeInterval = 3
+
     /// How often dock badge state is polled while badge polling is active.
     /// Clamped to at least 1 second; changing it reschedules a running poll.
     public var badgePollInterval: TimeInterval = 5 {
@@ -403,6 +408,10 @@ public final class WindowKit {
                     self.refreshTrackedApplicationsFromRepository()
 
                 case .applicationLaunched(let app):
+                    let launchedPID = app.processIdentifier
+                    if self.launchingApplications.contains(where: { $0.processIdentifier == launchedPID }) {
+                        self.scheduleLaunchTimeout(for: launchedPID, after: Self.postLaunchWindowGraceSeconds)
+                    }
                     self.tracker.repository.registerPID(app.processIdentifier)
                     self.refreshTrackedApplicationsFromRepository()
                     self.badgeStore.invalidateCache()
@@ -513,7 +522,7 @@ public final class WindowKit {
         trackedApplications.removeAll { $0.processIdentifier == pid }
     }
 
-    private func scheduleLaunchTimeout(for pid: pid_t) {
+    private func scheduleLaunchTimeout(for pid: pid_t, after seconds: TimeInterval = WindowKit.launchTimeoutSeconds) {
         launchTimeoutWork[pid]?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
@@ -521,7 +530,7 @@ public final class WindowKit {
             self.launchingApplications.removeAll { $0.processIdentifier == pid }
         }
         launchTimeoutWork[pid] = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.launchTimeoutSeconds, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
     }
 
     private func cancelLaunchTimeout(for pid: pid_t) {
