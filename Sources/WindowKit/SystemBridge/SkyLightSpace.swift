@@ -120,32 +120,17 @@ public enum WindowSpaces {
         }
         guard !windowsToMove.isEmpty else { return }
 
-        let operationName = "SLSBridgedMoveWindowsToManagedSpaceOperation"
-        let initSelector = NSSelectorFromString("initWithWindows:spaceID:")
-        let performSelector = NSSelectorFromString("performWithWMBridgeDelegate")
-
-        guard let operationClass = NSClassFromString(operationName) as? NSObject.Type,
-              let initMethod = class_getInstanceMethod(operationClass, initSelector),
-              let performMethod = class_getInstanceMethod(operationClass, performSelector),
-              let allocatedOperation = class_createInstance(operationClass, 0) as AnyObject? else {
-            throw WindowSpaceError.operationUnavailable(operationName)
-        }
-
-        typealias InitFunction = @convention(c) (AnyObject, Selector, AnyObject, UInt64) -> AnyObject
-        typealias PerformFunction = @convention(c) (AnyObject, Selector) -> Void
-
         let windows = windowsToMove.map { NSNumber(value: UInt32($0)) } as NSArray
-        let operation = unsafeBitCast(method_getImplementation(initMethod), to: InitFunction.self)(
-            allocatedOperation,
-            initSelector,
-            windows,
-            spaceID
-        )
-
-        unsafeBitCast(method_getImplementation(performMethod), to: PerformFunction.self)(
-            operation,
-            performSelector
-        )
+        let operation = try BridgedWindowManagementOperation.make(
+            "SLSBridgedMoveWindowsToManagedSpaceOperation",
+            selector: "initWithWindows:spaceID:"
+        ) { allocation, selector, implementation in
+            typealias Initializer = @convention(c) (AnyObject, Selector, AnyObject, UInt64) -> AnyObject
+            return unsafeBitCast(implementation, to: Initializer.self)(
+                allocation, selector, windows, spaceID
+            )
+        }
+        try BridgedWindowManagementOperation.perform(operation)
     }
 
     public static func moveToCurrentManagedSpace(windowID: CGWindowID) throws {
