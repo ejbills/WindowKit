@@ -5,7 +5,7 @@ public typealias CGSConnectionID = UInt32
 public typealias CGSSpaceID = UInt64
 
 typealias CGSSpaceMask = UInt64
-let kCGSAllSpacesMask: CGSSpaceMask = 0xFFFF_FFFF_FFFF_FFFF
+let kCGSAllSpacesMask: CGSSpaceMask = 0x7
 
 public struct CaptureOptions: OptionSet, Sendable {
     public let rawValue: UInt32
