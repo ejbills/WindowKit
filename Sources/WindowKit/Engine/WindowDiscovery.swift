@@ -305,6 +305,7 @@ struct WindowDiscovery {
     func captureWindow(withID windowID: CGWindowID) async -> CapturedWindow? {
         let capture = await onAXQueue { () -> CapturedWindow? in
             guard let descriptor = cgWindowDescriptor(forWindowID: windowID),
+                  !repository.excludedPIDs.contains(descriptor.ownerPID),
                   let app = NSRunningApplication(processIdentifier: descriptor.ownerPID)
             else { return nil }
             let appElement = AXUIElementCreateApplication(descriptor.ownerPID)

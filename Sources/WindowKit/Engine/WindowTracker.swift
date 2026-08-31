@@ -29,6 +29,7 @@ public final class WindowTracker {
 
     private let processWatcher = ProcessWatcher()
     private var watcherManager: AccessibilityWatcherManager?
+    private(set) var excludedBundleIDs: Set<String> = []
     private var subscriptions = Set<AnyCancellable>()
 
     public var processEvents: AnyPublisher<ProcessEvent, Never> { processWatcher.events }
@@ -129,9 +130,14 @@ public final class WindowTracker {
 
         let apps = processWatcher.runningApplications()
         Logger.debug("Found running applications", details: "count=\(apps.count)")
+        if !excludedBundleIDs.isEmpty {
+            repository.excludedPIDs = resolveExcludedPIDs(in: apps)
+        }
         for app in apps {
-            repository.registerPID(app.processIdentifier)
-            manager.watch(pid: app.processIdentifier)
+            let pid = app.processIdentifier
+            repository.registerPID(pid)
+            guard !repository.excludedPIDs.contains(pid) else { continue }
+            manager.watch(pid: pid)
         }
 
         startNotificationCenterWatcher()
@@ -177,10 +183,57 @@ public final class WindowTracker {
         watchRetryAttempts.withLockUnchecked { $0.removeAll() }
     }
 
+    /// Replaces the accessibility exclusion list and applies it to running apps:
+    /// newly excluded apps have their AX watchers detached and cached windows
+    /// purged (staying registered with zero windows); newly un-excluded apps are
+    /// rewatched and rediscovered. Resolves bundle identifiers to PIDs here so
+    /// per-event paths only do set lookups.
+    public func setExcludedBundleIDs(_ bundleIDs: Set<String>) {
+        excludedBundleIDs = bundleIDs
+        let oldPIDs = repository.excludedPIDs
+        let newPIDs = resolveExcludedPIDs(in: processWatcher.runningApplications())
+        repository.excludedPIDs = newPIDs
+
+        for pid in newPIDs.subtracting(oldPIDs) {
+            watcherManager?.unwatch(pid: pid)
+            watchRetryAttempts.withLockUnchecked { _ = $0.removeValue(forKey: pid) }
+            let windows = repository.readCache(forPID: pid)
+            repository.removeAll(forPID: pid)
+            repository.registerPID(pid)
+            for window in windows {
+                eventSubject.send(.windowDisappeared(window.id))
+            }
+            Logger.info("App excluded from accessibility", details: "pid=\(pid), purgedWindows=\(windows.count)")
+        }
+
+        for pid in oldPIDs.subtracting(newPIDs) {
+            guard let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated else { continue }
+            ensureWatching(pid: pid, reason: "exclusionLifted")
+            Task { [weak self] in
+                _ = await self?.trackApplication(app)
+            }
+        }
+    }
+
+    private func resolveExcludedPIDs(in apps: [NSRunningApplication]) -> Set<pid_t> {
+        guard !excludedBundleIDs.isEmpty else { return [] }
+        var resolved = Set<pid_t>()
+        for app in apps {
+            if let bundleID = app.bundleIdentifier, excludedBundleIDs.contains(bundleID) {
+                resolved.insert(app.processIdentifier)
+            }
+        }
+        return resolved
+    }
+
     @discardableResult
     public func trackApplication(_ app: NSRunningApplication) async -> [CapturedWindow] {
         let pid = app.processIdentifier
         if repository.ignoredPIDs.contains(pid) { return [] }
+        if repository.excludedPIDs.contains(pid) {
+            repository.registerPID(pid)
+            return []
+        }
         let appName = app.localizedName ?? "Unknown"
 
         let policy = app.activationPolicy
@@ -470,6 +523,11 @@ public final class WindowTracker {
 
         case .applicationLaunched(let app):
             repository.registerPID(app.processIdentifier)
+            if !excludedBundleIDs.isEmpty, let bundleID = app.bundleIdentifier, excludedBundleIDs.contains(bundleID) {
+                repository.excludedPIDs.insert(app.processIdentifier)
+                Logger.debug("Excluded app launched, skipping AX", details: "pid=\(app.processIdentifier), bundleID=\(bundleID)")
+                break
+            }
             ensureWatching(pid: app.processIdentifier, reason: "applicationLaunched")
             debounce(key: "refresh-\(app.processIdentifier)") { [weak self] in
                 guard let self else { return }
@@ -480,6 +538,7 @@ public final class WindowTracker {
             }
 
         case .applicationTerminated(let pid):
+            repository.excludedPIDs.remove(pid)
             watchRetryAttempts.withLockUnchecked { _ = $0.removeValue(forKey: pid) }
             watcherManager?.unwatch(pid: pid)
             destroyBurstState.withLockUnchecked { _ = $0.removeValue(forKey: pid) }
@@ -491,6 +550,7 @@ public final class WindowTracker {
 
         case .applicationActivated(let app):
             repository.registerPID(app.processIdentifier)
+            guard !repository.excludedPIDs.contains(app.processIdentifier) else { break }
             ensureWatching(pid: app.processIdentifier, reason: "applicationActivated")
             touchFocusedWindow(for: app)
             debounce(key: "refresh-\(app.processIdentifier)") { [weak self] in
@@ -565,6 +625,7 @@ public final class WindowTracker {
     }
 
     private func ensureWatching(pid: pid_t, reason: String) {
+        guard !repository.excludedPIDs.contains(pid) else { return }
         guard let watcherManager else { return }
         if watcherManager.isWatching(pid: pid) {
             watchRetryAttempts.withLockUnchecked { _ = $0.removeValue(forKey: pid) }
@@ -599,6 +660,10 @@ public final class WindowTracker {
         let delay = Self.watchRetryInitialDelay * pow(2.0, Double(attempt - 1))
         axQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self, self.isTracking, let watcherManager = self.watcherManager else { return }
+            guard !self.repository.excludedPIDs.contains(pid) else {
+                self.watchRetryAttempts.withLockUnchecked { _ = $0.removeValue(forKey: pid) }
+                return
+            }
             guard let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated else {
                 self.watchRetryAttempts.withLockUnchecked { _ = $0.removeValue(forKey: pid) }
                 return
@@ -620,6 +685,9 @@ public final class WindowTracker {
     }
 
     private func handleAccessibilityEvent(_ event: AccessibilityEvent, forPID pid: pid_t) {
+        // Watchers are detached for excluded PIDs, but events already in flight
+        // when the exclusion changed must not trigger AX reads.
+        guard !repository.excludedPIDs.contains(pid) else { return }
         guard let app = NSRunningApplication(processIdentifier: pid) else { return }
 
         // Post-cooldown full scan covers these; suppress to avoid redundant refreshes.

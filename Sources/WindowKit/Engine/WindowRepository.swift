@@ -18,6 +18,15 @@ public final class WindowRepository: @unchecked Sendable {
 
     public var ignoredPIDs: Set<pid_t> = []
 
+    /// PIDs resolved from `WindowTracker.excludedBundleIDs` — apps that must
+    /// never be touched through the accessibility API. Unlike ignored PIDs
+    /// they stay registered (tracked with zero windows).
+    public var excludedPIDs: Set<pid_t> = []
+
+    public func isExcludedOrIgnored(_ pid: pid_t) -> Bool {
+        excludedPIDs.contains(pid) || ignoredPIDs.contains(pid)
+    }
+
     /// Window IDs explicitly closed by the user via close(). These are suppressed
     /// briefly to avoid rediscovering a window while the close is still settling.
     private var suppressedWindowIDs: [pid_t: Set<CGWindowID>] = [:]
@@ -91,7 +100,7 @@ public final class WindowRepository: @unchecked Sendable {
 
     @discardableResult
     public func store(forPID pid: pid_t, windows: Set<CapturedWindow>) -> ChangeReport {
-        if ignoredPIDs.contains(pid) { return .empty }
+        if isExcludedOrIgnored(pid) { return .empty }
         cacheLock.lock()
         defer { cacheLock.unlock() }
 

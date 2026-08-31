@@ -345,6 +345,18 @@ public final class WindowKit {
         set { tracker.repository.ignoredPIDs = newValue }
     }
 
+    /// Bundle identifiers of apps that must never be touched through the
+    /// accessibility API: no AX observers are registered, no window discovery
+    /// runs, and no AX attributes are read for them. An excluded app still
+    /// appears in `trackedApplications` while running, but always with zero
+    /// windows. Changing the set takes effect immediately: newly excluded
+    /// running apps have their watchers detached and cached windows purged;
+    /// newly un-excluded apps are rewatched and rediscovered.
+    public var excludedBundleIDs: Set<String> {
+        get { tracker.excludedBundleIDs }
+        set { tracker.setExcludedBundleIDs(newValue) }
+    }
+
     /// Enables WindowKit's dock-badge refresh work, including event-driven refreshes and polling.
     public var badgeTrackingEnabled: Bool = true {
         didSet {
