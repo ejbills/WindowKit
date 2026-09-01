@@ -121,18 +121,20 @@ public struct WindowEnumerator {
     /// (content hosted by CampoRemoteService), and shapes like it. These are owned
     /// by the app process but are not app windows, so they must never be tracked
     /// or previewed. Detection requires all three: no close button, no title, and
-    /// AX children belonging to a different process. Real dialogs fail at least
-    /// one gate — sandboxed Open/Save panels are remote-hosted but titled with
-    /// window chrome, and NSAlerts are chromeless but render in-process.
+    /// a top-level `AXHostingView` child (AppKit's NSRemoteView hosting marker).
+    /// Real dialogs fail at least one gate — sandboxed Open/Save panels are
+    /// remote-hosted but titled with window chrome, and NSAlerts are chromeless
+    /// but render their content in-process.
+    ///
+    /// Do NOT detect this by comparing the child element's pid to the window's:
+    /// `AXUIElementGetPid` resolves proxied children to the HOST app's pid (the
+    /// remote pid appears only in the element token's description), so a pid
+    /// comparison never fires (measured against the live Siri input).
     private func isRemoteHostedSystemDialog(_ element: AXUIElement) -> Bool {
         guard ((try? element.closeButton()) ?? nil) == nil else { return false }
         if let title = ((try? element.title()) ?? nil), !title.isEmpty { return false }
-        guard let ownerPid = ((try? element.processID()) ?? nil),
-              let children = ((try? element.children()) ?? nil),
-              let firstChild = children.first,
-              let childPid = ((try? firstChild.processID()) ?? nil)
-        else { return false }
-        return childPid > 0 && childPid != ownerPid
+        guard let children = ((try? element.children()) ?? nil), !children.isEmpty else { return false }
+        return children.contains { (try? $0.subrole()) == "AXHostingView" }
     }
 
     public func meetsDiscoveryCriteria(windowID: CGWindowID, descriptor: CGWindowDescriptor) -> Bool {
