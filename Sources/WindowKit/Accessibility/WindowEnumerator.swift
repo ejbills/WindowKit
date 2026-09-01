@@ -95,6 +95,10 @@ public struct WindowEnumerator {
             if !validSubroles.contains(subrole) {
                 return false
             }
+            if subrole == kAXDialogSubrole as String, isRemoteHostedSystemDialog(element) {
+                Logger.debug("Rejecting remote-hosted system dialog", details: "pid=\((try? element.processID()) ?? 0)")
+                return false
+            }
         }
 
         if let size = try? element.size() {
@@ -110,6 +114,25 @@ public struct WindowEnumerator {
         }
 
         return true
+    }
+
+    /// Whether a dialog window is a chromeless remote-hosted system surface drawn
+    /// inside the app's own window — the macOS 27 Apple Intelligence / Siri input
+    /// (content hosted by CampoRemoteService), and shapes like it. These are owned
+    /// by the app process but are not app windows, so they must never be tracked
+    /// or previewed. Detection requires all three: no close button, no title, and
+    /// AX children belonging to a different process. Real dialogs fail at least
+    /// one gate — sandboxed Open/Save panels are remote-hosted but titled with
+    /// window chrome, and NSAlerts are chromeless but render in-process.
+    private func isRemoteHostedSystemDialog(_ element: AXUIElement) -> Bool {
+        guard ((try? element.closeButton()) ?? nil) == nil else { return false }
+        if let title = ((try? element.title()) ?? nil), !title.isEmpty { return false }
+        guard let ownerPid = ((try? element.processID()) ?? nil),
+              let children = ((try? element.children()) ?? nil),
+              let firstChild = children.first,
+              let childPid = ((try? firstChild.processID()) ?? nil)
+        else { return false }
+        return childPid > 0 && childPid != ownerPid
     }
 
     public func meetsDiscoveryCriteria(windowID: CGWindowID, descriptor: CGWindowDescriptor) -> Bool {
