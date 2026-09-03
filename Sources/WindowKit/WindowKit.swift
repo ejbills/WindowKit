@@ -245,13 +245,32 @@ public final class WindowKit {
     /// performs its AX raise, for every focus routed through WindowKit. Focusing a
     /// window whose Space differs from the display's current Space starts a
     /// Space switch with no swipe/hotkey input edge; a consumer that must react
-    /// ahead of the compositor (e.g. feeding `SpaceTransitionSignal
-    /// .noteSpaceSwitchInputEdge`) subscribes here once instead of at every
-    /// focus call site. Nothing is published for focuses rejected by the
+    /// ahead of the compositor subscribes here once instead of at every focus
+    /// call site. `switchesSpace` is resolved from the live Space table so the
+    /// consumer can act on it directly (`SpaceTransitionSignal
+    /// .noteImminentSpaceSwitch`) rather than waiting for the compositor to
+    /// confirm — under load the transforms can lag the request by well over the
+    /// confirm burst's window. Nothing is published for focuses rejected by the
     /// exclusion/ignore filters.
-    public var windowFocusRequested: AnyPublisher<CapturedWindow, Never> { windowFocusRequestedSubject.eraseToAnyPublisher() }
+    public var windowFocusRequested: AnyPublisher<WindowFocusRequest, Never> { windowFocusRequestedSubject.eraseToAnyPublisher() }
 
-    private let windowFocusRequestedSubject = PassthroughSubject<CapturedWindow, Never>()
+    private let windowFocusRequestedSubject = PassthroughSubject<WindowFocusRequest, Never>()
+
+    /// Fires on the main actor when a Space switch is about to start because a
+    /// window off every current Space is being raised — by `focusWindow` (before
+    /// the AX raise) or by the owning app itself (AX focus/main-window change,
+    /// which precedes the compositor for external activations). Consumers that
+    /// fade across Space switches feed this straight into
+    /// `SpaceTransitionSignal.noteImminentSpaceSwitch`.
+    public var spaceSwitchImminent: AnyPublisher<CGWindowID, Never> { spaceSwitchImminentSubject.eraseToAnyPublisher() }
+
+    private let spaceSwitchImminentSubject = PassthroughSubject<CGWindowID, Never>()
+
+    /// Whether raising `window` will move a display to another Space (see
+    /// `WindowSpaces.raisingSwitchesSpace`).
+    public func focusSwitchesSpace(_ window: CapturedWindow) -> Bool {
+        WindowSpaces.raisingSwitchesSpace(windowID: window.id)
+    }
 
     public private(set) var frontmostApplication: NSRunningApplication?
     public private(set) var trackedApplications: [NSRunningApplication] = []
@@ -383,7 +402,7 @@ public final class WindowKit {
         }
     }
 
-    private static let launchTimeoutSeconds: TimeInterval = 30
+    nonisolated private static let launchTimeoutSeconds: TimeInterval = 30
 
     /// Grace window after `isFinishedLaunching` flips for a first window to appear
     /// before a windowless app (agents, menu-bar helpers, terminal tools) stops
@@ -414,6 +433,12 @@ public final class WindowKit {
     private var badgeTrackingGeneration: UInt = 0
     private var shouldResumeBadgePollingAfterWake = false
     private var launchTimeoutWork: [pid_t: DispatchWorkItem] = [:]
+    private var lastTrackedRepositoryPIDs: [pid_t] = []
+
+    private var pendingTrackedRefresh = false
+    private var pendingPIDInvalidations: Set<pid_t> = []
+    private var pendingWindowInvalidations: Set<CGWindowID> = []
+    private var bookkeepingFlushScheduled = false
 
     private init() {
         self.tracker = WindowTracker()
@@ -473,6 +498,13 @@ public final class WindowKit {
             }
             .store(in: &cancellables)
 
+        tracker.windowRaisedOffSpace
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] windowID in
+                self?.spaceSwitchImminentSubject.send(windowID)
+            }
+            .store(in: &cancellables)
+
         tracker.events
             .receive(on: DispatchQueue.main)
             .sink { [weak self] event in
@@ -480,20 +512,24 @@ public final class WindowKit {
                 switch event {
                 case .windowAppeared(let window):
                     self.cancelLaunchTimeout(for: window.ownerPID)
-                    self.launchingApplications.removeAll { $0.processIdentifier == window.ownerPID }
-                    self.refreshTrackedApplicationsFromRepository()
-                    self.refreshWindowedApplicationPIDs()
-                    self.invalidateAppState(forPID: window.ownerPID)
+                    if self.launchingApplications.contains(where: { $0.processIdentifier == window.ownerPID }) {
+                        self.launchingApplications.removeAll { $0.processIdentifier == window.ownerPID }
+                    }
+                    self.pendingTrackedRefresh = true
+                    self.pendingPIDInvalidations.insert(window.ownerPID)
+                    self.scheduleBookkeepingFlush()
                 case .windowDisappeared(let id):
-                    self.refreshTrackedApplicationsFromRepository()
-                    self.refreshWindowedApplicationPIDs()
-                    self.invalidateAppState(forWindowID: id)
+                    self.pendingTrackedRefresh = true
+                    self.pendingWindowInvalidations.insert(id)
+                    self.scheduleBookkeepingFlush()
                 case .windowChanged(let window):
-                    self.invalidateAppState(forPID: window.ownerPID)
+                    self.pendingPIDInvalidations.insert(window.ownerPID)
+                    self.scheduleBookkeepingFlush()
                 case .windowActivityDetected:
                     break
                 case .previewCaptured(let id, _):
-                    self.invalidateAppState(forWindowID: id)
+                    self.pendingWindowInvalidations.insert(id)
+                    self.scheduleBookkeepingFlush()
                 case .notificationBannerChanged:
                     self.refreshAllBadges()
                 case .systemWoke:
@@ -532,10 +568,57 @@ public final class WindowKit {
         windowedApplicationPIDs = pids
     }
 
+    /// Coalesces bursts of `tracker.events` (e.g. ~1000 window events on a Space
+    /// switch) into a single pass of tracked-application resolution and app-state
+    /// invalidation per runloop turn, instead of repeating that work per event.
+    private func scheduleBookkeepingFlush() {
+        guard !bookkeepingFlushScheduled else { return }
+        bookkeepingFlushScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            self?.flushEventBookkeeping()
+        }
+    }
+
+    private func flushEventBookkeeping() {
+        bookkeepingFlushScheduled = false
+
+        if pendingTrackedRefresh {
+            pendingTrackedRefresh = false
+            refreshTrackedApplicationsFromRepository()
+            refreshWindowedApplicationPIDs()
+        }
+
+        var pidsToInvalidate = pendingPIDInvalidations
+        pendingPIDInvalidations.removeAll()
+
+        let windowIDs = pendingWindowInvalidations
+        pendingWindowInvalidations.removeAll()
+        for id in windowIDs {
+            if let window = tracker.repository.readCache(windowID: id) {
+                pidsToInvalidate.insert(window.ownerPID)
+            } else {
+                for state in appStates.values {
+                    state.invalidate()
+                }
+            }
+        }
+
+        for pid in pidsToInvalidate {
+            invalidateAppState(forPID: pid)
+        }
+    }
+
     private func refreshTrackedApplicationsFromRepository() {
-        let applications = tracker.repository.trackedApplications()
-            .map { (app: $0, pid: $0.processIdentifier) }
-            .sorted { $0.pid < $1.pid }
+        let currentRepositoryPIDs = tracker.repository.trackedPIDs()
+        guard currentRepositoryPIDs != lastTrackedRepositoryPIDs else { return }
+        lastTrackedRepositoryPIDs = currentRepositoryPIDs
+
+        let applications = currentRepositoryPIDs
+            .compactMap { pid -> (app: NSRunningApplication, pid: pid_t)? in
+                guard let app = NSRunningApplication(processIdentifier: pid),
+                      app.activationPolicy == .regular else { return nil }
+                return (app: app, pid: pid)
+            }
 
         let pids = applications.map(\.pid)
         let currentPIDs = trackedApplications.map(\.processIdentifier)
@@ -545,6 +628,7 @@ public final class WindowKit {
     }
 
     private func removeTrackedApplication(pid: pid_t) {
+        lastTrackedRepositoryPIDs = []
         guard trackedApplications.contains(where: { $0.processIdentifier == pid }) else { return }
         trackedApplications.removeAll { $0.processIdentifier == pid }
     }
@@ -654,7 +738,11 @@ public final class WindowKit {
     /// in the cache immediately.
     public func focusWindow(_ window: CapturedWindow) async throws {
         if !tracker.repository.isExcludedOrIgnored(window.ownerPID) {
-            windowFocusRequestedSubject.send(window)
+            let switchesSpace = focusSwitchesSpace(window)
+            windowFocusRequestedSubject.send(WindowFocusRequest(window: window, switchesSpace: switchesSpace))
+            if switchesSpace {
+                spaceSwitchImminentSubject.send(window.id)
+            }
         }
         try await tracker.focusWindow(window)
     }
@@ -724,6 +812,7 @@ public final class WindowKit {
         cancelLaunchTimeout(for: pid)
         launchingApplications.removeAll { $0.processIdentifier == pid }
         trackedApplications.removeAll { $0.processIdentifier == pid }
+        lastTrackedRepositoryPIDs = []
         badgeStore.removeBadge(forPID: pid)
         badgeStore.invalidateCache()
         appStates[pid]?.invalidateBadge()
@@ -756,6 +845,23 @@ public final class WindowKit {
     /// current by AX events.
     public func refreshPreviews(application: NSRunningApplication) async {
         _ = await tracker.cachedWindowsRefreshingPreviews(for: application.processIdentifier)
+    }
+
+    /// Captures one window's thumbnail now (regardless of cache freshness), stores it, and emits `.previewCaptured`.
+    public func capturePreview(windowID: CGWindowID) async -> CGImage? {
+        await tracker.capturePreview(for: windowID)
+    }
+
+    /// Captures the window's thumbnail only when the cached one is missing or older than `previewCacheDuration`.
+    /// Returns the fresh or newly captured image.
+    public func capturePreviewIfStale(windowID: CGWindowID) async -> CGImage? {
+        if let cached = tracker.repository.freshPreview(forWindowID: windowID) { return cached }
+        return await tracker.capturePreview(for: windowID)
+    }
+
+    /// Window IDs whose cached preview is within `previewCacheDuration`.
+    public func windowIDsWithFreshPreviews() -> Set<CGWindowID> {
+        tracker.repository.windowIDsWithFreshPreviews()
     }
 
     public func refreshAll() async {
@@ -1063,4 +1169,12 @@ public final class WindowKit {
         }
     }
 
+}
+
+/// Payload of `WindowKit.windowFocusRequested`.
+public struct WindowFocusRequest: Sendable {
+    public let window: CapturedWindow
+    /// Raising this window switches a display to another Space (see
+    /// `WindowKit.focusSwitchesSpace`).
+    public let switchesSpace: Bool
 }

@@ -52,14 +52,26 @@ private func spaceTransitionNotifyProc(
 /// `transitionStarted`, and calls `stop()` (or releases it) to deregister.
 @MainActor
 public final class SpaceTransitionSignal {
-    public var transitionStarted: AnyPublisher<Void, Never> { subject.eraseToAnyPublisher() }
+    public var transitionStarted: AnyPublisher<SpaceTransitionStart, Never> { subject.eraseToAnyPublisher() }
 
-    private let subject = PassthroughSubject<Void, Never>()
+    private let subject = PassthroughSubject<SpaceTransitionStart, Never>()
     private var registered = false
     private var connectionID: CGSConnectionID = 0
     private var confirmTimer: Timer?
     private var confirmTicks = 0
     private var lastPublishTime: CFAbsoluteTime = 0
+    private struct DisplaySpaces {
+        let spaceIDs: [CGSSpaceID]
+        let currentSpaceID: CGSSpaceID
+        let extent: CGFloat
+    }
+
+    private var cachedDisplays: [DisplaySpaces] = []
+    private var cachedDisplaysAt: CFAbsoluteTime = 0
+
+    /// How long the managed-Space ID list is reused across confirm-burst reads;
+    /// the Space table itself is stable within a burst, only the transforms move.
+    private static let spaceIDCacheLifetime: CFAbsoluteTime = 1.0
 
     /// Minimum |tx|/|ty| (points) in a Space's live transform for it to count as
     /// actively translating. A real transition reads well above this almost
@@ -141,12 +153,31 @@ public final class SpaceTransitionSignal {
         RunLoop.main.add(timer, forMode: .common)
     }
 
+    /// The consumer knows a Space switch is about to start (it is raising a
+    /// window whose Space is not current on any display). Publishes at once
+    /// instead of waiting for the transforms: under heavy WindowServer load the
+    /// compositor can take longer than the confirm burst's cap to start moving,
+    /// and a late publish is worse than none. A trailing 913 or transform
+    /// confirmation for the same switch is absorbed by the dedupe window; the
+    /// consumer's commit/fallback handling restores if the switch never lands.
+    public func noteImminentSpaceSwitch() {
+        cancelConfirmBurst()
+        let now = CFAbsoluteTimeGetCurrent()
+        guard now - lastPublishTime > Self.publishDedupeWindow else {
+            Logger.debug("SpaceTransitionSignal: imminent hint deduped", details: "sincePublish=\(String(format: "%.3f", now - lastPublishTime))")
+            return
+        }
+        lastPublishTime = now
+        Logger.debug("SpaceTransitionSignal: publish (imminent)")
+        subject.send(SpaceTransitionStart(progress: 0))
+    }
+
     /// Synchronous read of whether any managed Space is still mid-translation.
     /// Lets a consumer's commit-fallback distinguish "transition still animating
     /// (or finger still holding the swipe) — keep waiting" from "transition
     /// evaporated without a commit — restore". Read failures report false.
     public func isTransitionUnderway() -> Bool {
-        isSpaceActuallyTransitioning(assumeTransitioningOnReadFailure: false)
+        transitionProgress(assumeTransitioningOnReadFailure: false) != nil
     }
 
     private func cancelConfirmBurst() {
@@ -161,29 +192,67 @@ public final class SpaceTransitionSignal {
     /// transforms stays unconfirmed instead.
     @discardableResult
     private func publishIfTransitioning(assumeTransitioningOnReadFailure: Bool) -> Bool {
-        guard isSpaceActuallyTransitioning(assumeTransitioningOnReadFailure: assumeTransitioningOnReadFailure) else {
+        guard let progress = transitionProgress(assumeTransitioningOnReadFailure: assumeTransitioningOnReadFailure) else {
             return false
         }
         let now = CFAbsoluteTimeGetCurrent()
         if now - lastPublishTime > Self.publishDedupeWindow {
             lastPublishTime = now
-            subject.send()
+            Logger.debug("SpaceTransitionSignal: publish (transforms moving)", details: "source=\(assumeTransitioningOnReadFailure ? "913" : "confirm burst tick \(confirmTicks)") progress=\(String(format: "%.2f", progress))")
+            subject.send(SpaceTransitionStart(progress: progress))
+        } else {
+            Logger.debug("SpaceTransitionSignal: transforms moving, deduped", details: "sincePublish=\(String(format: "%.3f", now - lastPublishTime))")
         }
         return true
     }
 
-    /// True when any managed Space on any display is mid-translation. Reads are
-    /// a single synchronous pass per call.
-    private func isSpaceActuallyTransitioning(assumeTransitioningOnReadFailure: Bool) -> Bool {
-        guard let displays = try? WindowSpaces.managedDisplays() else { return assumeTransitioningOnReadFailure }
+    /// How far the transition has progressed when any managed Space on any
+    /// display is mid-translation, `nil` when none is. Progress is the outgoing
+    /// (still-current) Space's translation over its display's extent, 0 when
+    /// only a non-current Space reads as moving. Reads are a single synchronous
+    /// pass per call.
+    private func transitionProgress(assumeTransitioningOnReadFailure: Bool) -> CGFloat? {
+        guard let displays = currentDisplays() else { return assumeTransitioningOnReadFailure ? 0 : nil }
+        var moving = false
+        var progress: CGFloat = 0
         for display in displays {
-            for space in display.spaces {
-                let transform = cgsSpaceTransform(space.id)
-                if abs(transform.tx) >= Self.translationThreshold || abs(transform.ty) >= Self.translationThreshold {
-                    return true
+            for spaceID in display.spaceIDs {
+                let transform = cgsSpaceTransform(spaceID)
+                let translation = max(abs(transform.tx), abs(transform.ty))
+                guard translation >= Self.translationThreshold else { continue }
+                moving = true
+                if spaceID == display.currentSpaceID, display.extent > 0 {
+                    progress = max(progress, min(translation / display.extent, 1))
                 }
             }
         }
-        return false
+        return moving ? progress : nil
     }
+
+    private func currentDisplays() -> [DisplaySpaces]? {
+        let now = CFAbsoluteTimeGetCurrent()
+        if !cachedDisplays.isEmpty, now - cachedDisplaysAt < Self.spaceIDCacheLifetime {
+            return cachedDisplays
+        }
+        guard let displays = try? WindowSpaces.managedDisplays() else { return nil }
+        cachedDisplays = displays.map { display in
+            let frame = display.screen?.frame ?? .zero
+            return DisplaySpaces(
+                spaceIDs: display.spaces.map(\.id),
+                currentSpaceID: display.currentSpaceID,
+                extent: max(frame.width, frame.height)
+            )
+        }
+        cachedDisplaysAt = now
+        return cachedDisplays
+    }
+}
+
+/// Payload of `SpaceTransitionSignal.transitionStarted`.
+public struct SpaceTransitionStart: Sendable {
+    /// 0 when the switch has not visibly begun (input edge, imminent raise, or
+    /// the first confirm-burst tick), rising toward 1 as the outgoing Space
+    /// slides off. A late 913 (settle glide) reports close to 1; consumers use
+    /// it to skip a reaction that could no longer complete before commit.
+    public let progress: CGFloat
 }

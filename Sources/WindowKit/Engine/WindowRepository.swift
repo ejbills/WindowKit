@@ -76,14 +76,19 @@ public final class WindowRepository: @unchecked Sendable {
     public init() {}
 
     public func trackedApplications() -> [NSRunningApplication] {
-        cacheLock.lock()
-        let pids = entries.keys.sorted()
-        cacheLock.unlock()
+        let pids = trackedPIDs()
         return pids.compactMap { pid in
             guard let app = NSRunningApplication(processIdentifier: pid),
                   app.activationPolicy == .regular else { return nil }
             return app
         }
+    }
+
+    /// The pids currently present in the window cache, sorted.
+    public func trackedPIDs() -> [pid_t] {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return entries.keys.sorted()
     }
 
     /// PIDs that currently have at least one cached window.
@@ -436,6 +441,24 @@ public final class WindowRepository: @unchecked Sendable {
             }
         }
         return freshIDs
+    }
+
+    public func freshPreview(forWindowID windowID: CGWindowID) -> CGImage? {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        let now = Date()
+        let cacheDuration = previewCacheDuration
+        for windowSet in entries.values {
+            for window in windowSet where window.id == windowID {
+                if let preview = window.cachedPreview,
+                   let timestamp = window.previewTimestamp,
+                   now.timeIntervalSince(timestamp) <= cacheDuration {
+                    return preview
+                }
+                return nil
+            }
+        }
+        return nil
     }
 
     public func windowIDsWithFreshPreviews(forPID pid: pid_t) -> Set<CGWindowID> {

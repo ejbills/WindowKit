@@ -103,6 +103,16 @@ public enum WindowSpaces {
         cgsWindowSpaces(CGSMainConnectionID(), windowID).map(CGSSpaceID.init)
     }
 
+    /// Whether raising the window moves a display to another Space: its managed
+    /// Spaces are known and none of them is current on any display. Windows on
+    /// every Space (or with no readable Space list) resolve to `false`.
+    public static func raisingSwitchesSpace(windowID: CGWindowID) -> Bool {
+        let windowSpaces = Set(spaces(forWindowID: windowID))
+        guard !windowSpaces.isEmpty, let displays = try? managedDisplays() else { return false }
+        let currentSpaces = Set(displays.map(\.currentSpaceID))
+        return !currentSpaces.isEmpty && windowSpaces.isDisjoint(with: currentSpaces)
+    }
+
     public static func move(windowID: CGWindowID, toManagedSpace spaceID: CGSSpaceID) throws {
         try move(windowIDs: [windowID], toManagedSpace: spaceID)
     }

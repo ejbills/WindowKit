@@ -12,6 +12,16 @@ public final class WindowTracker {
     }
 
     private let eventSubject = PassthroughSubject<WindowEvent, Never>()
+
+    /// A tracked app raised (focused/made main) a window whose Spaces are all
+    /// off-screen — the earliest in-process sign of a Space switch the app
+    /// itself initiated (external `activate`, Cmd-Tab, URL open). Emitted on
+    /// the AX queue.
+    public var windowRaisedOffSpace: AnyPublisher<CGWindowID, Never> {
+        windowRaisedOffSpaceSubject.eraseToAnyPublisher()
+    }
+
+    private let windowRaisedOffSpaceSubject = PassthroughSubject<CGWindowID, Never>()
     var headless: Bool = false {
         didSet { discovery.screenshotService.headless = headless }
     }
@@ -322,6 +332,7 @@ public final class WindowTracker {
         let freshIDs = repository.windowIDsWithFreshPreviews(forPID: pid)
         let stale = windows.filter { !freshIDs.contains($0.id) }
         for window in stale {
+            if Task.isCancelled { break }
             _ = await capturePreview(for: window.id)
         }
         return Array(repository.readCache(forPID: pid))
@@ -532,6 +543,7 @@ public final class WindowTracker {
         let needsCapture = windows.filter { !freshIDs.contains($0.id) }
 
         for window in needsCapture {
+            if Task.isCancelled { break }
             _ = await capturePreview(for: window.id)
         }
     }
@@ -853,6 +865,9 @@ public final class WindowTracker {
 
         case .windowFocused(let element), .mainWindowChanged(let element):
             let windowID = try? element.windowID()
+            if let windowID, WindowSpaces.raisingSwitchesSpace(windowID: windowID) {
+                windowRaisedOffSpaceSubject.send(windowID)
+            }
             updateWindowTimestamp(windowID: windowID, pid: pid)
 
         case .titleChanged(let element):
