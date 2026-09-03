@@ -46,6 +46,10 @@ final class OrphanedWindowTracker: @unchecked Sendable {
         didSet { screenshotService.downsampleFactor = previewResolutionScale }
     }
 
+    /// Exclusion probe wired at construction; CGWindowList enumeration would
+    /// otherwise resurface windows of apps purged by the AX exclusion list.
+    var isExcluded: (pid_t) -> Bool = { _ in false }
+
     var windowsPublisher: AnyPublisher<[DockMinimizedWindow], Never> { subject.eraseToAnyPublisher() }
     private let subject = CurrentValueSubject<[DockMinimizedWindow], Never>([])
 
@@ -112,6 +116,7 @@ final class OrphanedWindowTracker: @unchecked Sendable {
     /// Presses the window's live Dock item (`AXPress`) to restore it, and drops it
     /// from the published set immediately so the tile disappears on click.
     func restore(id: String) {
+        if let pid = subject.value.first(where: { $0.id == id })?.ownerPID, isExcluded(pid) { return }
         let element = itemElements.withLock { $0[id] }
         guard let element else { return }
         queue.async { [weak self] in
@@ -245,7 +250,8 @@ final class OrphanedWindowTracker: @unchecked Sendable {
         for info in infos {
             guard let title = info[kCGWindowName as String] as? String, !title.isEmpty,
                   let windowID = info[kCGWindowNumber as String] as? CGWindowID,
-                  let pid = info[kCGWindowOwnerPID as String] as? pid_t else { continue }
+                  let pid = info[kCGWindowOwnerPID as String] as? pid_t,
+                  !isExcluded(pid) else { continue }
             map[title, default: []].append((windowID, pid))
         }
         return map

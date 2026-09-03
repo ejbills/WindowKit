@@ -16,15 +16,55 @@ public final class WindowRepository: @unchecked Sendable {
     private let cacheLock = NSLock()
     private var lastPreviewPurge = Date.distantPast
 
-    public var ignoredPIDs: Set<pid_t> = []
+    // Written on the main actor, read from AX/discovery/observer queues.
+    private var _ignoredPIDs: Set<pid_t> = []
+    private var _excludedPIDs: Set<pid_t> = []
+
+    public var ignoredPIDs: Set<pid_t> {
+        get {
+            cacheLock.lock()
+            defer { cacheLock.unlock() }
+            return _ignoredPIDs
+        }
+        set {
+            cacheLock.lock()
+            defer { cacheLock.unlock() }
+            _ignoredPIDs = newValue
+        }
+    }
 
     /// PIDs resolved from `WindowTracker.excludedBundleIDs` — apps that must
     /// never be touched through the accessibility API. Unlike ignored PIDs
     /// they stay registered (tracked with zero windows).
-    public var excludedPIDs: Set<pid_t> = []
+    public var excludedPIDs: Set<pid_t> {
+        get {
+            cacheLock.lock()
+            defer { cacheLock.unlock() }
+            return _excludedPIDs
+        }
+        set {
+            cacheLock.lock()
+            defer { cacheLock.unlock() }
+            _excludedPIDs = newValue
+        }
+    }
+
+    public func insertExcludedPID(_ pid: pid_t) {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        _excludedPIDs.insert(pid)
+    }
+
+    public func removeExcludedPID(_ pid: pid_t) {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        _excludedPIDs.remove(pid)
+    }
 
     public func isExcludedOrIgnored(_ pid: pid_t) -> Bool {
-        excludedPIDs.contains(pid) || ignoredPIDs.contains(pid)
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return _excludedPIDs.contains(pid) || _ignoredPIDs.contains(pid)
     }
 
     /// Window IDs explicitly closed by the user via close(). These are suppressed

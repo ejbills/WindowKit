@@ -241,6 +241,18 @@ public final class WindowKit {
 
     public var processEvents: AnyPublisher<ProcessEvent, Never> { tracker.processEvents }
 
+    /// Fires synchronously on the main actor immediately BEFORE `focusWindow`
+    /// performs its AX raise, for every focus routed through WindowKit. Focusing a
+    /// window whose Space differs from the display's current Space starts a
+    /// Space switch with no swipe/hotkey input edge; a consumer that must react
+    /// ahead of the compositor (e.g. feeding `SpaceTransitionSignal
+    /// .noteSpaceSwitchInputEdge`) subscribes here once instead of at every
+    /// focus call site. Nothing is published for focuses rejected by the
+    /// exclusion/ignore filters.
+    public var windowFocusRequested: AnyPublisher<CapturedWindow, Never> { windowFocusRequestedSubject.eraseToAnyPublisher() }
+
+    private let windowFocusRequestedSubject = PassthroughSubject<CapturedWindow, Never>()
+
     public private(set) var frontmostApplication: NSRunningApplication?
     public private(set) var trackedApplications: [NSRunningApplication] = []
     public private(set) var launchingApplications: [NSRunningApplication] = []
@@ -406,6 +418,9 @@ public final class WindowKit {
     private init() {
         self.tracker = WindowTracker()
         self.frontmostApplication = tracker.frontmostApplication
+        orphanedWindowTracker.isExcluded = { [repository = tracker.repository] pid in
+            repository.isExcludedOrIgnored(pid)
+        }
 
         tracker.processEvents
             .sink { [weak self] event in
@@ -638,6 +653,9 @@ public final class WindowKit {
     /// Brings the window to front, reflecting its unminimize/unhide side effects
     /// in the cache immediately.
     public func focusWindow(_ window: CapturedWindow) async throws {
+        if !tracker.repository.isExcludedOrIgnored(window.ownerPID) {
+            windowFocusRequestedSubject.send(window)
+        }
         try await tracker.focusWindow(window)
     }
 

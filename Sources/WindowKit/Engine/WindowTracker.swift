@@ -136,7 +136,7 @@ public final class WindowTracker {
         for app in apps {
             let pid = app.processIdentifier
             repository.registerPID(pid)
-            guard !repository.excludedPIDs.contains(pid) else { continue }
+            guard !repository.isExcludedOrIgnored(pid) else { continue }
             manager.watch(pid: pid)
         }
 
@@ -234,6 +234,14 @@ public final class WindowTracker {
             repository.registerPID(pid)
             return []
         }
+        // The launch-time exclusion gate can miss when the bundle identifier was
+        // not yet resolvable (non-standard launches); re-check here before any AX work.
+        if !excludedBundleIDs.isEmpty, let bundleID = app.bundleIdentifier, excludedBundleIDs.contains(bundleID) {
+            repository.insertExcludedPID(pid)
+            repository.registerPID(pid)
+            Logger.debug("Excluded app resolved at track time, skipping AX", details: "pid=\(pid), bundleID=\(bundleID)")
+            return []
+        }
         let appName = app.localizedName ?? "Unknown"
 
         let policy = app.activationPolicy
@@ -326,6 +334,7 @@ public final class WindowTracker {
     /// event-driven minimized state can go stale; call this before decisions
     /// that depend on the current minimized state.
     public func reconcileMinimizedState(for pid: pid_t) async -> [CapturedWindow] {
+        guard !repository.isExcludedOrIgnored(pid) else { return [] }
         let cached = repository.readCache(forPID: pid)
         guard !cached.isEmpty else { return cached }
 
@@ -377,6 +386,7 @@ public final class WindowTracker {
 
     /// Closes the window and suppresses it from future discovery.
     public func closeWindow(_ window: CapturedWindow) async throws {
+        guard !repository.isExcludedOrIgnored(window.ownerPID) else { return }
         try await window.close()
         repository.suppress(windowID: window.id, forPID: window.ownerPID)
         eventSubject.send(.windowDisappeared(window.id))
@@ -390,6 +400,7 @@ public final class WindowTracker {
     /// Minimizes the window and immediately reflects the state in the cache
     /// (miniaturize notifications are not reliably delivered, e.g. under Stage Manager).
     public func minimizeWindow(_ window: CapturedWindow) async throws {
+        guard !repository.isExcludedOrIgnored(window.ownerPID) else { return }
         var target = window
         try await target.minimize()
         applyCachedWindowState(windowID: window.id, pid: window.ownerPID) { $0.isMinimized = true }
@@ -398,6 +409,7 @@ public final class WindowTracker {
     /// Restores the window and immediately reflects the unminimize (and the
     /// bring-to-front's unhide side effect) in the cache.
     public func restoreWindow(_ window: CapturedWindow) async throws {
+        guard !repository.isExcludedOrIgnored(window.ownerPID) else { return }
         var target = window
         try await target.restore()
         applyCachedWindowState(windowID: window.id, pid: window.ownerPID) { $0.isMinimized = false }
@@ -407,6 +419,7 @@ public final class WindowTracker {
     /// Toggles the window's minimized state and immediately reflects it in the cache.
     @discardableResult
     public func toggleMinimizeWindow(_ window: CapturedWindow) async throws -> Bool {
+        guard !repository.isExcludedOrIgnored(window.ownerPID) else { return window.isMinimized }
         var target = window
         let minimized = try await target.toggleMinimize()
         applyCachedWindowState(windowID: window.id, pid: window.ownerPID) { $0.isMinimized = minimized }
@@ -419,6 +432,7 @@ public final class WindowTracker {
     /// Brings the window to front and immediately reflects the unminimize/unhide
     /// side effects in the cache.
     public func focusWindow(_ window: CapturedWindow) async throws {
+        guard !repository.isExcludedOrIgnored(window.ownerPID) else { return }
         var target = window
         try await target.bringToFront()
         applyCachedWindowState(windowID: window.id, pid: window.ownerPID) { $0.isMinimized = false }
@@ -428,6 +442,7 @@ public final class WindowTracker {
     /// Hides the window's owner application and immediately marks all of its
     /// cached windows hidden.
     public func hideWindowOwner(_ window: CapturedWindow) async throws {
+        guard !repository.isExcludedOrIgnored(window.ownerPID) else { return }
         var target = window
         try await target.hide()
         applyCachedOwnerHidden(pid: window.ownerPID, hidden: true)
@@ -436,6 +451,7 @@ public final class WindowTracker {
     /// Unhides the window's owner application and immediately marks all of its
     /// cached windows visible.
     public func unhideWindowOwner(_ window: CapturedWindow) async throws {
+        guard !repository.isExcludedOrIgnored(window.ownerPID) else { return }
         var target = window
         try await target.unhide()
         applyCachedOwnerHidden(pid: window.ownerPID, hidden: false)
@@ -445,6 +461,7 @@ public final class WindowTracker {
     /// across all of its cached windows.
     @discardableResult
     public func toggleWindowOwnerHidden(_ window: CapturedWindow) async throws -> Bool {
+        guard !repository.isExcludedOrIgnored(window.ownerPID) else { return window.isOwnerHidden }
         var target = window
         let hidden = try await target.toggleHidden()
         applyCachedOwnerHidden(pid: window.ownerPID, hidden: hidden)
@@ -453,12 +470,14 @@ public final class WindowTracker {
 
     /// Enters fullscreen and immediately reflects the state in the cache.
     public func enterFullScreen(_ window: CapturedWindow) async throws {
+        guard !repository.isExcludedOrIgnored(window.ownerPID) else { return }
         try await window.enterFullScreen()
         applyCachedWindowState(windowID: window.id, pid: window.ownerPID) { $0.isFullscreen = true }
     }
 
     /// Exits fullscreen and immediately reflects the state in the cache.
     public func exitFullScreen(_ window: CapturedWindow) async throws {
+        guard !repository.isExcludedOrIgnored(window.ownerPID) else { return }
         try await window.exitFullScreen()
         applyCachedWindowState(windowID: window.id, pid: window.ownerPID) { $0.isFullscreen = false }
     }
@@ -466,6 +485,7 @@ public final class WindowTracker {
     /// Toggles fullscreen and optimistically flips the cached state; discovery
     /// corrects it if the transition failed.
     public func toggleFullScreen(_ window: CapturedWindow) async throws {
+        guard !repository.isExcludedOrIgnored(window.ownerPID) else { return }
         try await window.toggleFullScreen()
         let flipped = !window.isFullscreen
         applyCachedWindowState(windowID: window.id, pid: window.ownerPID) { $0.isFullscreen = flipped }
@@ -524,7 +544,7 @@ public final class WindowTracker {
         case .applicationLaunched(let app):
             repository.registerPID(app.processIdentifier)
             if !excludedBundleIDs.isEmpty, let bundleID = app.bundleIdentifier, excludedBundleIDs.contains(bundleID) {
-                repository.excludedPIDs.insert(app.processIdentifier)
+                repository.insertExcludedPID(app.processIdentifier)
                 Logger.debug("Excluded app launched, skipping AX", details: "pid=\(app.processIdentifier), bundleID=\(bundleID)")
                 break
             }
@@ -538,7 +558,7 @@ public final class WindowTracker {
             }
 
         case .applicationTerminated(let pid):
-            repository.excludedPIDs.remove(pid)
+            repository.removeExcludedPID(pid)
             watchRetryAttempts.withLockUnchecked { _ = $0.removeValue(forKey: pid) }
             watcherManager?.unwatch(pid: pid)
             destroyBurstState.withLockUnchecked { _ = $0.removeValue(forKey: pid) }
@@ -550,7 +570,7 @@ public final class WindowTracker {
 
         case .applicationActivated(let app):
             repository.registerPID(app.processIdentifier)
-            guard !repository.excludedPIDs.contains(app.processIdentifier) else { break }
+            guard !repository.isExcludedOrIgnored(app.processIdentifier) else { break }
             ensureWatching(pid: app.processIdentifier, reason: "applicationActivated")
             touchFocusedWindow(for: app)
             debounce(key: "refresh-\(app.processIdentifier)") { [weak self] in
@@ -625,7 +645,7 @@ public final class WindowTracker {
     }
 
     private func ensureWatching(pid: pid_t, reason: String) {
-        guard !repository.excludedPIDs.contains(pid) else { return }
+        guard !repository.isExcludedOrIgnored(pid) else { return }
         guard let watcherManager else { return }
         if watcherManager.isWatching(pid: pid) {
             watchRetryAttempts.withLockUnchecked { _ = $0.removeValue(forKey: pid) }
@@ -660,12 +680,22 @@ public final class WindowTracker {
         let delay = Self.watchRetryInitialDelay * pow(2.0, Double(attempt - 1))
         axQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self, self.isTracking, let watcherManager = self.watcherManager else { return }
-            guard !self.repository.excludedPIDs.contains(pid) else {
+            guard !self.repository.isExcludedOrIgnored(pid) else {
                 self.watchRetryAttempts.withLockUnchecked { _ = $0.removeValue(forKey: pid) }
                 return
             }
             guard let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated else {
                 self.watchRetryAttempts.withLockUnchecked { _ = $0.removeValue(forKey: pid) }
+                return
+            }
+            // The launch-time exclusion gate can miss when the bundle identifier
+            // was not yet resolvable; re-check before attaching the watcher.
+            if !self.excludedBundleIDs.isEmpty, let bundleID = app.bundleIdentifier,
+               self.excludedBundleIDs.contains(bundleID) {
+                self.repository.insertExcludedPID(pid)
+                self.repository.registerPID(pid)
+                self.watchRetryAttempts.withLockUnchecked { _ = $0.removeValue(forKey: pid) }
+                Logger.debug("Excluded app resolved at watch retry, skipping AX", details: "pid=\(pid), bundleID=\(bundleID)")
                 return
             }
             if watcherManager.isWatching(pid: pid) {
@@ -687,7 +717,7 @@ public final class WindowTracker {
     private func handleAccessibilityEvent(_ event: AccessibilityEvent, forPID pid: pid_t) {
         // Watchers are detached for excluded PIDs, but events already in flight
         // when the exclusion changed must not trigger AX reads.
-        guard !repository.excludedPIDs.contains(pid) else { return }
+        guard !repository.isExcludedOrIgnored(pid) else { return }
         guard let app = NSRunningApplication(processIdentifier: pid) else { return }
 
         // Post-cooldown full scan covers these; suppress to avoid redundant refreshes.
