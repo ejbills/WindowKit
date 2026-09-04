@@ -1,27 +1,41 @@
 import Cocoa
 import Combine
 
-/// SkyLight connection-notify event that fires when the Dock's Exposé state
-/// changes: at the start of Show Desktop (measured ~120ms before the windows
-/// begin moving) and again when it ends, and likewise around Mission Control.
+/// SkyLight connection-notify events around Exposé (Show Desktop, Mission
+/// Control). Measured on macOS 27:
+/// - 1327 fires when an Exposé transition BEGINS, in both directions: ~500ms
+///   before the Space change on Mission Control entry and exit, and ~300ms
+///   before Mission Control's window is torn down on exit.
+/// - 1508 fires when the Dock's Exposé state changes: at the start of Show
+///   Desktop (~120ms before the windows begin moving) and again when it ends;
+///   at Mission Control entry, but only after commit on Mission Control exit.
 /// Only delivered to connections that own on-screen windows. Silent at idle.
+private let exposeTransitionBeganEvent: UInt32 = 1327
 private let exposeStateChangedEvent: UInt32 = 1508
 
 /// Bridges the non-capturing C callback to the live signal. Set while a signal
 /// is registered, `nil` after teardown so a late callback is a no-op.
-private nonisolated(unsafe) var exposeStateSignalHandler: (() -> Void)?
+private nonisolated(unsafe) var exposeStateSignalHandler: ((UInt32) -> Void)?
 
 /// Top-level, non-capturing callback handed to SkyLight. It must NOT call back
 /// into SkyLight synchronously; it only hops to the main queue.
 private func exposeStateNotifyProc(
-    _: UInt32,
+    _ event: UInt32,
     _: UnsafeMutableRawPointer?,
     _: UInt32,
     _: UnsafeMutableRawPointer?
 ) {
     DispatchQueue.main.async {
-        exposeStateSignalHandler?()
+        exposeStateSignalHandler?(event)
     }
+}
+
+public enum ExposeEvent: Sendable {
+    /// An Exposé transition (into or out of Mission Control / Show Desktop) is
+    /// starting; nothing has moved yet.
+    case transitionBegan
+    /// The Dock's Exposé state changed.
+    case stateChanged
 }
 
 /// Publishes Exposé state changes (Show Desktop, Mission Control) so a consumer
@@ -31,9 +45,9 @@ private func exposeStateNotifyProc(
 /// owns one instance, calls `start()`, and `stop()`s or releases it.
 @MainActor
 public final class ExposeStateSignal {
-    public var stateChanged: AnyPublisher<Void, Never> { subject.eraseToAnyPublisher() }
+    public var events: AnyPublisher<ExposeEvent, Never> { subject.eraseToAnyPublisher() }
 
-    private let subject = PassthroughSubject<Void, Never>()
+    private let subject = PassthroughSubject<ExposeEvent, Never>()
     private var registered = false
     private var connectionID: CGSConnectionID = 0
 
@@ -42,6 +56,7 @@ public final class ExposeStateSignal {
     deinit {
         exposeStateSignalHandler = nil
         if registered {
+            _ = slsRemoveConnectionNotify(connectionID, exposeStateNotifyProc, exposeTransitionBeganEvent, nil)
             _ = slsRemoveConnectionNotify(connectionID, exposeStateNotifyProc, exposeStateChangedEvent, nil)
         }
     }
@@ -50,13 +65,14 @@ public final class ExposeStateSignal {
     public func start() {
         guard !registered else { return }
         connectionID = cgsMainConnection()
-        exposeStateSignalHandler = { [weak self] in
+        exposeStateSignalHandler = { [weak self] event in
             MainActor.assumeIsolated {
-                self?.subject.send()
+                self?.subject.send(event == exposeTransitionBeganEvent ? .transitionBegan : .stateChanged)
             }
         }
-        let result = slsRegisterConnectionNotify(connectionID, exposeStateNotifyProc, exposeStateChangedEvent, nil)
-        registered = result == 0
+        let began = slsRegisterConnectionNotify(connectionID, exposeStateNotifyProc, exposeTransitionBeganEvent, nil)
+        let changed = slsRegisterConnectionNotify(connectionID, exposeStateNotifyProc, exposeStateChangedEvent, nil)
+        registered = began == 0 || changed == 0
         if !registered {
             exposeStateSignalHandler = nil
         }
@@ -66,6 +82,7 @@ public final class ExposeStateSignal {
     public func stop() {
         exposeStateSignalHandler = nil
         if registered {
+            _ = slsRemoveConnectionNotify(connectionID, exposeStateNotifyProc, exposeTransitionBeganEvent, nil)
             _ = slsRemoveConnectionNotify(connectionID, exposeStateNotifyProc, exposeStateChangedEvent, nil)
             registered = false
         }
