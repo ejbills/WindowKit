@@ -1,11 +1,30 @@
 import Cocoa
 import ScreenCaptureKit
+import os
 
 struct WindowDiscovery {
     static let minimumWindowSize = CGSize(width: 100, height: 100)
     static let axWorkQueue = DispatchQueue(label: "com.windowkit.axDiscovery", qos: .userInitiated)
 
     let repository: WindowRepository
+    /// One `SCShareableContent` snapshot shared by every app discovered inside a
+    /// full scan (`beginSharedContentScope`/`endSharedContentScope`); the fetch
+    /// enumerates every window on screen and costs over a second at ~1000
+    /// windows, so per-app fetches made a full scan quadratic in window count.
+    private let sharedContent = OSAllocatedUnfairLock<SCShareableContent?>(initialState: nil)
+
+    @available(macOS 12.3, *)
+    func beginSharedContentScope() async {
+        guard SystemPermissions.hasScreenRecording() else { return }
+        let content: SCShareableContent? = await ConcurrencyHelpers.withTimeoutOptional {
+            try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+        }
+        sharedContent.withLock { $0 = content }
+    }
+
+    func endSharedContentScope() {
+        sharedContent.withLock { $0 = nil }
+    }
     var screenshotService: ScreenshotService
     let enumerator: WindowEnumerator
 
@@ -88,8 +107,12 @@ struct WindowDiscovery {
     ) async -> (windows: [CapturedWindow], visibleWindowIDs: Set<CGWindowID>)? {
         let pid = app.processIdentifier
 
-        let contentResult: SCShareableContent? = await ConcurrencyHelpers.withTimeoutOptional {
-            try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+        let contentResult: SCShareableContent? = if let shared = sharedContent.withLock({ $0 }) {
+            shared
+        } else {
+            await ConcurrencyHelpers.withTimeoutOptional {
+                try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+            }
         }
 
         guard let content = contentResult else {
@@ -101,10 +124,11 @@ struct WindowDiscovery {
         }
         let validAppWindows = appWindows.filter(isValidSCKWindow)
         let visibleWindowIDs = Set(validAppWindows.map(\.windowID))
+        let spaceLookup = Self.spaceLookup(for: visibleWindowIDs)
 
         let results: [CapturedWindow] = await ConcurrencyHelpers.mapConcurrent(validAppWindows, maxConcurrent: 4, timeout: 10) { scWindow -> CapturedWindow? in
             return await self.onAXQueue {
-                self.captureFromSCKWindow(scWindow, app: app)
+                self.captureFromSCKWindow(scWindow, app: app, spaceLookup: spaceLookup)
             } ?? nil
         }
 
@@ -133,7 +157,15 @@ struct WindowDiscovery {
     }
 
     @available(macOS 12.3, *)
-    private func captureFromSCKWindow(_ scWindow: SCWindow, app: NSRunningApplication) -> CapturedWindow? {
+    /// One WindowServer query per managed Space for the whole batch; a window on
+    /// no managed Space falls back to its own per-window lookup in the caller.
+    private static func spaceLookup(for windowIDs: Set<CGWindowID>) -> [CGWindowID: [Int]] {
+        guard windowIDs.count > 1, let displays = try? WindowSpaces.managedDisplays() else { return [:] }
+        let spaceIDs = displays.flatMap { $0.spaces.map(\.id) }
+        return cgsWindowSpaceMap(CGSMainConnectionID(), spaceIDs: spaceIDs, windowIDs: windowIDs)
+    }
+
+    private func captureFromSCKWindow(_ scWindow: SCWindow, app: NSRunningApplication, spaceLookup: [CGWindowID: [Int]] = [:]) -> CapturedWindow? {
         let pid = app.processIdentifier
         let appElement = AXUIElement.application(pid: pid)
 
@@ -154,7 +186,7 @@ struct WindowDiscovery {
         let isMinimized = (try? axWindow.isMinimized()) ?? false
         let isFullscreen = (try? axWindow.isFullscreen()) ?? false
         let isHidden = app.isHidden
-        let spaceID = scWindow.windowID.spaces().first
+        let spaceID = spaceLookup[scWindow.windowID]?.first ?? scWindow.windowID.spaces().first
         let existingWindow = repository.readCache(windowID: scWindow.windowID)
         let creationTime = if let existingWindow, existingWindow.axElement == axWindow {
             existingWindow.creationTime
@@ -238,6 +270,7 @@ struct WindowDiscovery {
 
             let cgCandidates = self.enumerator.cgDescriptors(forPID: pid)
             let activeSpaces = activeSpaceIDs()
+            let spaceLookup = Self.spaceLookup(for: Set(cgCandidates.map(\.windowID)))
 
             var candidates: [AXCandidate] = []
             var usedIDs = excludeIDs
@@ -264,7 +297,8 @@ struct WindowDiscovery {
                     descriptor: descriptor,
                     app: app,
                     activeSpaces: activeSpaces,
-                    isScreenCaptureKitBacked: false
+                    isScreenCaptureKitBacked: false,
+                    knownSpaces: spaceLookup[windowID].map(Set.init)
                 ) else {
                     continue
                 }
@@ -284,6 +318,7 @@ struct WindowDiscovery {
 
         let pid = app.processIdentifier
         let appElement = AXUIElement.application(pid: pid)
+        let spaceLookup = Self.spaceLookup(for: Set(candidateWindows.map(\.windowID)))
         let results = await ConcurrencyHelpers.mapConcurrent(candidateWindows, maxConcurrent: 4, timeout: 10) { candidate -> CapturedWindow? in
             await self.onAXQueue {
                 self.captureAXWindow(
@@ -291,7 +326,8 @@ struct WindowDiscovery {
                     windowID: candidate.windowID,
                     descriptor: candidate.descriptor,
                     app: app,
-                    appElement: appElement
+                    appElement: appElement,
+                    spaceLookup: spaceLookup
                 )
             } ?? nil
         }
@@ -328,13 +364,14 @@ struct WindowDiscovery {
         windowID: CGWindowID,
         descriptor: CGWindowDescriptor,
         app: NSRunningApplication,
-        appElement: AXUIElement
+        appElement: AXUIElement,
+        spaceLookup: [CGWindowID: [Int]] = [:]
     ) -> CapturedWindow? {
         let title = (try? axWindow.title()) ?? windowID.title()
         let isMinimized = (try? axWindow.isMinimized()) ?? false
         let isFullscreen = (try? axWindow.isFullscreen()) ?? false
         let isHidden = app.isHidden
-        let spaceID = windowID.spaces().first
+        let spaceID = spaceLookup[windowID]?.first ?? windowID.spaces().first
         let closeButton = try? axWindow.closeButton()
         let subrole = try? axWindow.subrole()
         let existingWindow = repository.readCache(windowID: windowID)

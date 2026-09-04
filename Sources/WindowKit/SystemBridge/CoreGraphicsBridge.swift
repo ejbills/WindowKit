@@ -113,29 +113,6 @@ private typealias SLSCopyManagedDisplaySpacesType = @convention(c) (
     CGSConnectionID
 ) -> Unmanaged<CFArray>?
 
-/// Connection-notify callback SkyLight invokes for registered event codes.
-/// Parameters: (event type, data, data length, context). Must be a top-level
-/// non-capturing C function and must never call back into SkyLight.
-typealias SLSConnectionNotifyProc = @convention(c) (
-    UInt32, UnsafeMutableRawPointer?, UInt32, UnsafeMutableRawPointer?
-) -> Void
-
-private typealias SLSRegisterConnectionNotifyProcType = @convention(c) (
-    CGSConnectionID, SLSConnectionNotifyProc, UInt32, UnsafeMutableRawPointer?
-) -> Int32
-
-private typealias SLSRemoveConnectionNotifyProcType = @convention(c) (
-    CGSConnectionID, SLSConnectionNotifyProc, UInt32, UnsafeMutableRawPointer?
-) -> Int32
-
-/// Returns the in-flight animation transform of a managed Space by value (via
-/// the x8 sret register — Swift handles this when the return type is
-/// `CGAffineTransform`). The third argument is an unused optional out-param.
-/// A Space that is not translating reports the identity transform.
-private typealias SLSSpaceGetTransformType = @convention(c) (
-    CGSConnectionID, CGSSpaceID, UnsafeMutablePointer<Int32>?
-) -> CGAffineTransform
-
 enum SLSSpaceAbsoluteLevel: Int32 {
     case `default` = 0
     case setupAssistant = 100
@@ -154,9 +131,8 @@ private var spaceSetAbsoluteLevelPtr: SLSSpaceSetAbsoluteLevelType?
 private var showSpacesPtr: SLSShowSpacesType?
 private var spaceAddWindowsPtr: SLSSpaceAddWindowsAndRemoveFromSpacesType?
 private var copyManagedDisplaySpacesPtr: SLSCopyManagedDisplaySpacesType?
-private var registerConnectionNotifyPtr: SLSRegisterConnectionNotifyProcType?
-private var removeConnectionNotifyPtr: SLSRemoveConnectionNotifyProcType?
-private var spaceGetTransformPtr: SLSSpaceGetTransformType?
+private typealias SLSCopyWindowsWithOptionsAndTagsType = @convention(c) (CGSConnectionID, UInt32, CFArray, UInt32, UnsafeMutablePointer<UInt64>, UnsafeMutablePointer<UInt64>) -> Unmanaged<CFArray>?
+private var copyWindowsWithOptionsAndTagsPtr: SLSCopyWindowsWithOptionsAndTagsType?
 
 private func loadSkyLightFunctions() {
     guard skyLightHandle == nil else { return }
@@ -188,24 +164,16 @@ private func loadSkyLightFunctions() {
         showSpacesPtr = unsafeBitCast(symbol, to: SLSShowSpacesType.self)
     }
 
+    if let symbol = dlsym(handle, "SLSCopyWindowsWithOptionsAndTags") {
+        copyWindowsWithOptionsAndTagsPtr = unsafeBitCast(symbol, to: SLSCopyWindowsWithOptionsAndTagsType.self)
+    }
+
     if let symbol = dlsym(handle, "SLSSpaceAddWindowsAndRemoveFromSpaces") {
         spaceAddWindowsPtr = unsafeBitCast(symbol, to: SLSSpaceAddWindowsAndRemoveFromSpacesType.self)
     }
 
     if let symbol = dlsym(handle, "SLSCopyManagedDisplaySpaces") {
         copyManagedDisplaySpacesPtr = unsafeBitCast(symbol, to: SLSCopyManagedDisplaySpacesType.self)
-    }
-
-    if let symbol = dlsym(handle, "SLSRegisterConnectionNotifyProc") {
-        registerConnectionNotifyPtr = unsafeBitCast(symbol, to: SLSRegisterConnectionNotifyProcType.self)
-    }
-
-    if let symbol = dlsym(handle, "SLSRemoveConnectionNotifyProc") {
-        removeConnectionNotifyPtr = unsafeBitCast(symbol, to: SLSRemoveConnectionNotifyProcType.self)
-    }
-
-    if let symbol = dlsym(handle, "SLSSpaceGetTransform") {
-        spaceGetTransformPtr = unsafeBitCast(symbol, to: SLSSpaceGetTransformType.self)
     }
 }
 
@@ -259,6 +227,30 @@ public func cgsWindowSpaces(_ connection: CGSConnectionID, _ windowID: CGWindowI
         return []
     }
     return spaces.map { Int($0.uint64Value) }
+}
+
+/// Window → Spaces lookup for a batch of windows in one WindowServer round
+/// trip per Space, instead of one per window (`cgsWindowSpaces`). Windows on
+/// none of `spaceIDs` are absent from the result; callers fall back per window.
+public func cgsWindowSpaceMap(_ connection: CGSConnectionID, spaceIDs: [CGSSpaceID], windowIDs: Set<CGWindowID>) -> [CGWindowID: [Int]] {
+    var result: [CGWindowID: [Int]] = [:]
+    guard !windowIDs.isEmpty else { return result }
+    loadSkyLightFunctions()
+    for spaceID in spaceIDs {
+        var setTags: UInt64 = 0
+        var clearTags: UInt64 = 0
+        let spaces: CFArray = [NSNumber(value: spaceID)] as CFArray
+        guard let windows = copyWindowsWithOptionsAndTagsPtr?(connection, 0, spaces, 0x2, &setTags, &clearTags)?.takeRetainedValue() as? [NSNumber] else {
+            continue
+        }
+        for number in windows {
+            let windowID = CGWindowID(number.uint32Value)
+            if windowIDs.contains(windowID) {
+                result[windowID, default: []].append(Int(spaceID))
+            }
+        }
+    }
+    return result
 }
 
 public func cgsWindowLevel(_ connection: CGSConnectionID, _ windowID: CGWindowID) -> Int32 {
@@ -406,61 +398,38 @@ func slsCopyManagedDisplaySpaces(_ connection: CGSConnectionID) -> CFArray? {
     return copyManagedDisplaySpacesPtr?(connection)?.takeRetainedValue()
 }
 
-/// Registers a connection-notify proc for `event` on `connection`. Returns 0 on
-/// success. `callback` must be a top-level non-capturing C function.
-@discardableResult
-func slsRegisterConnectionNotify(
-    _ connection: CGSConnectionID,
-    _ callback: SLSConnectionNotifyProc,
-    _ event: UInt32,
-    _ context: UnsafeMutableRawPointer?
-) -> Int32 {
-    loadSkyLightFunctions()
-    guard let fn = registerConnectionNotifyPtr else { return -1 }
-    return fn(connection, callback, event, context)
-}
-
-/// Deregisters a previously registered connection-notify proc. Must be handed
-/// the same `callback`, `event`, and `context` used to register.
-@discardableResult
-func slsRemoveConnectionNotify(
-    _ connection: CGSConnectionID,
-    _ callback: SLSConnectionNotifyProc,
-    _ event: UInt32,
-    _ context: UnsafeMutableRawPointer?
-) -> Int32 {
-    loadSkyLightFunctions()
-    guard let fn = removeConnectionNotifyPtr else { return -1 }
-    return fn(connection, callback, event, context)
-}
-
-/// The in-flight animation transform of a managed Space on the main connection.
-/// A Space at rest reports identity; a Space mid-transition reports a non-zero
-/// `tx`/`ty` translation.
-public func cgsSpaceTransform(_ spaceID: CGSSpaceID) -> CGAffineTransform {
-    loadSkyLightFunctions()
-    guard let fn = spaceGetTransformPtr else { return .identity }
-    return fn(cgsMainConnection(), spaceID, nil)
-}
-
 public func activeSpaceIDs() -> Set<Int> {
     var result = Set<Int>()
     let connection = cgsMainConnection()
+
+    // The current Space of every managed display — one SkyLight call. The
+    // window-list walk below is only the fallback when that read fails.
+    if let displays = try? WindowSpaces.managedDisplays() {
+        result.formUnion(displays.map { Int($0.currentSpaceID) })
+        if !result.isEmpty { return result }
+    }
 
     guard let windowList = CGWindowListCopyWindowInfo([.excludeDesktopElements], kCGNullWindowID) as? [[String: AnyObject]] else {
         return result
     }
 
+    var windowNumbers: [NSNumber] = []
     for dict in windowList {
         let layer = (dict[kCGWindowLayer as String] as? NSNumber)?.intValue ?? -1
         let isOnScreen = (dict[kCGWindowIsOnscreen as String] as? NSNumber)?.boolValue ?? false
 
         guard layer == 0, isOnScreen else { continue }
 
-        if let windowNumber = (dict[kCGWindowNumber as String] as? NSNumber)?.uint32Value {
-            let spaces = cgsWindowSpaces(connection, CGWindowID(windowNumber))
-            result.formUnion(spaces)
+        if let windowNumber = dict[kCGWindowNumber as String] as? NSNumber {
+            windowNumbers.append(windowNumber)
         }
+    }
+    guard !windowNumbers.isEmpty else { return result }
+
+    // One round trip for the whole batch: the call already returns the union
+    // of Spaces for every window passed, which is exactly this set.
+    if let spaces = CGSCopySpacesForWindows(connection, kCGSAllSpacesMask, windowNumbers as CFArray) as? [NSNumber] {
+        result.formUnion(spaces.map { Int($0.uint64Value) })
     }
 
     return result

@@ -241,37 +241,6 @@ public final class WindowKit {
 
     public var processEvents: AnyPublisher<ProcessEvent, Never> { tracker.processEvents }
 
-    /// Fires synchronously on the main actor immediately BEFORE `focusWindow`
-    /// performs its AX raise, for every focus routed through WindowKit. Focusing a
-    /// window whose Space differs from the display's current Space starts a
-    /// Space switch with no swipe/hotkey input edge; a consumer that must react
-    /// ahead of the compositor subscribes here once instead of at every focus
-    /// call site. `switchesSpace` is resolved from the live Space table so the
-    /// consumer can act on it directly (`SpaceTransitionSignal
-    /// .noteImminentSpaceSwitch`) rather than waiting for the compositor to
-    /// confirm — under load the transforms can lag the request by well over the
-    /// confirm burst's window. Nothing is published for focuses rejected by the
-    /// exclusion/ignore filters.
-    public var windowFocusRequested: AnyPublisher<WindowFocusRequest, Never> { windowFocusRequestedSubject.eraseToAnyPublisher() }
-
-    private let windowFocusRequestedSubject = PassthroughSubject<WindowFocusRequest, Never>()
-
-    /// Fires on the main actor when a Space switch is about to start because a
-    /// window off every current Space is being raised — by `focusWindow` (before
-    /// the AX raise) or by the owning app itself (AX focus/main-window change,
-    /// which precedes the compositor for external activations). Consumers that
-    /// fade across Space switches feed this straight into
-    /// `SpaceTransitionSignal.noteImminentSpaceSwitch`.
-    public var spaceSwitchImminent: AnyPublisher<CGWindowID, Never> { spaceSwitchImminentSubject.eraseToAnyPublisher() }
-
-    private let spaceSwitchImminentSubject = PassthroughSubject<CGWindowID, Never>()
-
-    /// Whether raising `window` will move a display to another Space (see
-    /// `WindowSpaces.raisingSwitchesSpace`).
-    public func focusSwitchesSpace(_ window: CapturedWindow) -> Bool {
-        WindowSpaces.raisingSwitchesSpace(windowID: window.id)
-    }
-
     public private(set) var frontmostApplication: NSRunningApplication?
     public private(set) var trackedApplications: [NSRunningApplication] = []
     public private(set) var launchingApplications: [NSRunningApplication] = []
@@ -495,13 +464,6 @@ public final class WindowKit {
                 case .spaceChanged:
                     break
                 }
-            }
-            .store(in: &cancellables)
-
-        tracker.windowRaisedOffSpace
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] windowID in
-                self?.spaceSwitchImminentSubject.send(windowID)
             }
             .store(in: &cancellables)
 
@@ -737,13 +699,6 @@ public final class WindowKit {
     /// Brings the window to front, reflecting its unminimize/unhide side effects
     /// in the cache immediately.
     public func focusWindow(_ window: CapturedWindow) async throws {
-        if !tracker.repository.isExcludedOrIgnored(window.ownerPID) {
-            let switchesSpace = focusSwitchesSpace(window)
-            windowFocusRequestedSubject.send(WindowFocusRequest(window: window, switchesSpace: switchesSpace))
-            if switchesSpace {
-                spaceSwitchImminentSubject.send(window.id)
-            }
-        }
         try await tracker.focusWindow(window)
     }
 
@@ -1169,12 +1124,4 @@ public final class WindowKit {
         }
     }
 
-}
-
-/// Payload of `WindowKit.windowFocusRequested`.
-public struct WindowFocusRequest: Sendable {
-    public let window: CapturedWindow
-    /// Raising this window switches a display to another Space (see
-    /// `WindowKit.focusSwitchesSpace`).
-    public let switchesSpace: Bool
 }

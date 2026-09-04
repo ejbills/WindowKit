@@ -161,12 +161,13 @@ public struct WindowEnumerator {
         descriptor: CGWindowDescriptor,
         app: NSRunningApplication,
         activeSpaces: Set<Int>,
-        isScreenCaptureKitBacked: Bool
+        isScreenCaptureKitBacked: Bool,
+        knownSpaces: Set<Int>? = nil
     ) -> Bool {
         let isOnScreen = descriptor.isOnScreen
         let isFullscreen = (try? element.isFullscreen()) ?? false
         let isMinimized = (try? element.isMinimized()) ?? false
-        let windowSpaces = Set(windowID.spaces())
+        let windowSpaces = knownSpaces ?? Set(windowID.spaces())
 
         let isOnActiveSpace = !windowSpaces.isEmpty && !windowSpaces.isDisjoint(with: activeSpaces)
 
