@@ -240,6 +240,35 @@ extension CapturedWindow {
     }
 }
 
+/// A shown, unmanaged Space at the default absolute level. Windows added to it
+/// are composited over every managed Space on every display and take no part
+/// in Space transitions: they neither slide with an outgoing Space nor
+/// re-appear at commit, which is how the native Dock and menu bar behave.
+/// Uses raw SkyLight calls, which work for the calling process's own windows
+/// (foreign windows need the bridged `WindowStash` path). The Space outlives
+/// the process until logout; keep one per process.
+@MainActor
+public final class WindowOverlaySpace {
+    public let id: CGSSpaceID
+    private let connection: CGSConnectionID
+
+    public init() throws {
+        connection = CGSMainConnectionID()
+        guard let spaceID = slsCreateSpace(connection) else {
+            throw WindowSpaceError.operationUnavailable("SLSSpaceCreate")
+        }
+        slsSetSpaceAbsoluteLevel(connection, spaceID, .default)
+        slsShowSpaces(connection, [spaceID])
+        id = spaceID
+    }
+
+    /// Moves the window into the overlay Space, removing it from every managed
+    /// Space. Call after the window is ordered on screen.
+    public func add(windowID: CGWindowID) {
+        slsSpaceAddWindows(connection, id, [windowID])
+    }
+}
+
 final class SkyLightSpaceOperator {
     static let shared = SkyLightSpaceOperator()
 
