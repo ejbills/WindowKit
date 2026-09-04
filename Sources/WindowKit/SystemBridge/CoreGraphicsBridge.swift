@@ -113,6 +113,21 @@ private typealias SLSCopyManagedDisplaySpacesType = @convention(c) (
     CGSConnectionID
 ) -> Unmanaged<CFArray>?
 
+/// Connection-notify callback SkyLight invokes for registered event codes.
+/// Parameters: (event type, data, data length, context). Must be a top-level
+/// non-capturing C function and must never call back into SkyLight.
+typealias SLSConnectionNotifyProc = @convention(c) (
+    UInt32, UnsafeMutableRawPointer?, UInt32, UnsafeMutableRawPointer?
+) -> Void
+
+private typealias SLSRegisterConnectionNotifyProcType = @convention(c) (
+    CGSConnectionID, SLSConnectionNotifyProc, UInt32, UnsafeMutableRawPointer?
+) -> Int32
+
+private typealias SLSRemoveConnectionNotifyProcType = @convention(c) (
+    CGSConnectionID, SLSConnectionNotifyProc, UInt32, UnsafeMutableRawPointer?
+) -> Int32
+
 enum SLSSpaceAbsoluteLevel: Int32 {
     case `default` = 0
     case setupAssistant = 100
@@ -131,6 +146,8 @@ private var spaceSetAbsoluteLevelPtr: SLSSpaceSetAbsoluteLevelType?
 private var showSpacesPtr: SLSShowSpacesType?
 private var spaceAddWindowsPtr: SLSSpaceAddWindowsAndRemoveFromSpacesType?
 private var copyManagedDisplaySpacesPtr: SLSCopyManagedDisplaySpacesType?
+private var registerConnectionNotifyPtr: SLSRegisterConnectionNotifyProcType?
+private var removeConnectionNotifyPtr: SLSRemoveConnectionNotifyProcType?
 private typealias SLSCopyWindowsWithOptionsAndTagsType = @convention(c) (CGSConnectionID, UInt32, CFArray, UInt32, UnsafeMutablePointer<UInt64>, UnsafeMutablePointer<UInt64>) -> Unmanaged<CFArray>?
 private var copyWindowsWithOptionsAndTagsPtr: SLSCopyWindowsWithOptionsAndTagsType?
 
@@ -174,6 +191,14 @@ private func loadSkyLightFunctions() {
 
     if let symbol = dlsym(handle, "SLSCopyManagedDisplaySpaces") {
         copyManagedDisplaySpacesPtr = unsafeBitCast(symbol, to: SLSCopyManagedDisplaySpacesType.self)
+    }
+
+    if let symbol = dlsym(handle, "SLSRegisterConnectionNotifyProc") {
+        registerConnectionNotifyPtr = unsafeBitCast(symbol, to: SLSRegisterConnectionNotifyProcType.self)
+    }
+
+    if let symbol = dlsym(handle, "SLSRemoveConnectionNotifyProc") {
+        removeConnectionNotifyPtr = unsafeBitCast(symbol, to: SLSRemoveConnectionNotifyProcType.self)
     }
 }
 
@@ -396,6 +421,34 @@ func slsSpaceAddWindows(
 func slsCopyManagedDisplaySpaces(_ connection: CGSConnectionID) -> CFArray? {
     loadSkyLightFunctions()
     return copyManagedDisplaySpacesPtr?(connection)?.takeRetainedValue()
+}
+
+/// Registers a connection-notify proc for `event` on `connection`. Returns 0 on
+/// success. `callback` must be a top-level non-capturing C function.
+@discardableResult
+func slsRegisterConnectionNotify(
+    _ connection: CGSConnectionID,
+    _ callback: SLSConnectionNotifyProc,
+    _ event: UInt32,
+    _ context: UnsafeMutableRawPointer?
+) -> Int32 {
+    loadSkyLightFunctions()
+    guard let fn = registerConnectionNotifyPtr else { return -1 }
+    return fn(connection, callback, event, context)
+}
+
+/// Deregisters a previously registered connection-notify proc. Must be handed
+/// the same `callback`, `event`, and `context` used to register.
+@discardableResult
+func slsRemoveConnectionNotify(
+    _ connection: CGSConnectionID,
+    _ callback: SLSConnectionNotifyProc,
+    _ event: UInt32,
+    _ context: UnsafeMutableRawPointer?
+) -> Int32 {
+    loadSkyLightFunctions()
+    guard let fn = removeConnectionNotifyPtr else { return -1 }
+    return fn(connection, callback, event, context)
 }
 
 public func activeSpaceIDs() -> Set<Int> {
