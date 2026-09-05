@@ -36,7 +36,7 @@ public struct ScreenshotService: Sendable {
         var windowIDValue = UInt32(windowID)
 
         let resolutionOption: CaptureOptions = captureQuality == .best ? .fullResolution : .efficientResolution
-        let options: CaptureOptions = [.ignoreClipping, resolutionOption]
+        let options: CaptureOptions = [.ignoreClipping, .stageManagerFullSize, resolutionOption]
 
         guard let images = CGSHWCaptureWindowList(
             connection,
@@ -45,6 +45,10 @@ public struct ScreenshotService: Sendable {
             options
         ) as? [CGImage],
         let image = images.first else {
+            throw ScreenshotError.captureFailure
+        }
+
+        guard !Self.isFullyTransparent(image) else {
             throw ScreenshotError.captureFailure
         }
 
@@ -65,6 +69,37 @@ public struct ScreenshotService: Sendable {
     /// From WebKit's CoreGraphicsSPI.h: kCGImageCachingTransient = 1,
     /// kCGImageCachingTemporary = 3 (the default). 0 is not a defined flag value.
     private static let kCGImageCachingTransient: UInt32 = 1
+
+    /// Some apps (Electron/Chromium hosts under Stage Manager, backgrounded
+    /// GPU-composited windows) hand back an all-zero-alpha surface. Sample the
+    /// alpha channel on a 16x16 grid so those captures are treated as failures
+    /// rather than cached as blank previews.
+    static func isFullyTransparent(_ image: CGImage) -> Bool {
+        let alphaOffset: Int
+        switch image.alphaInfo {
+        case .premultipliedFirst, .first: alphaOffset = 0
+        case .premultipliedLast, .last: alphaOffset = 3
+        default: return false
+        }
+        guard image.bitsPerPixel == 32,
+              let data = image.dataProvider?.data,
+              let bytes = CFDataGetBytePtr(data)
+        else { return false }
+        let length = CFDataGetLength(data)
+        let stepX = max(image.width / 16, 1)
+        let stepY = max(image.height / 16, 1)
+        var y = 0
+        while y < image.height {
+            var x = 0
+            while x < image.width {
+                let offset = y * image.bytesPerRow + x * 4 + alphaOffset
+                if offset < length, bytes[offset] != 0 { return false }
+                x += stepX
+            }
+            y += stepY
+        }
+        return true
+    }
 
     static func downsampled(_ image: CGImage, factor: Int) -> CGImage? {
         let divisor = max(1, factor)

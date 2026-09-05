@@ -254,6 +254,7 @@ extension WindowEnumerator {
     public static func isFuzzyTitleMatch(_ title1: String, _ title2: String) -> Bool {
         let words1 = Set(title1.lowercased().split(separator: " "))
         let words2 = Set(title2.lowercased().split(separator: " "))
+        guard !words1.isEmpty, !words2.isEmpty else { return false }
 
         let matchingWords = words1.intersection(words2)
         let matchPercentage = Double(matchingWords.count) / Double(max(words1.count, words2.count))
