@@ -857,9 +857,13 @@ public final class WindowTracker {
                 emitChanges(changes)
             }
 
-        case .windowFocused(let element), .mainWindowChanged(let element):
-            let windowID = try? element.windowID()
-            updateWindowTimestamp(windowID: windowID, pid: pid)
+        case .windowFocused(let element):
+            guard isLiveFocusedWindow(element, pid: pid) else { break }
+            updateWindowTimestamp(windowID: try? element.windowID(), pid: pid)
+
+        case .mainWindowChanged(let element):
+            guard (try? element.isMainWindow()) == true else { break }
+            updateWindowTimestamp(windowID: try? element.windowID(), pid: pid)
 
         case .titleChanged(let element):
             // Coalesced: apps rewriting their title continuously would starve
@@ -934,6 +938,18 @@ public final class WindowTracker {
             windows.insert(updated)
         }
         emitChanges(changes)
+    }
+
+    /// AppKit posts focus and main-window notifications from BOTH the window
+    /// resigning the role and the one assuming it, so the element a notification
+    /// carries is not proof that window is now frontmost.
+    private func isLiveFocusedWindow(_ element: AXUIElement, pid: pid_t) -> Bool {
+        guard let focused = try? AXUIElement.application(pid: pid).focusedWindow() else { return false }
+        if focused == element { return true }
+        guard let focusedID = try? focused.windowID(), let elementID = try? element.windowID() else {
+            return false
+        }
+        return focusedID == elementID
     }
 
     private func updateWindowTimestamp(windowID: CGWindowID?, pid: pid_t) {
