@@ -265,10 +265,16 @@ struct WindowDiscovery {
         let candidateWindows: [AXCandidate]? = await onAXQueue({ () -> [AXCandidate] in
             let appElement = AXUIElement.application(pid: pid)
             _ = appElement // used later in capture
-            let axWindows = self.enumerator.enumerateWindows(forPID: pid)
+            let cgCandidates = self.enumerator.cgDescriptors(forPID: pid)
+            let seeking = Set(
+                cgCandidates
+                    .filter { self.enumerator.meetsDiscoveryCriteria(windowID: $0.windowID, descriptor: $0) }
+                    .map(\.windowID)
+            ).subtracting(excludeIDs)
+
+            let axWindows = self.enumerator.enumerateWindows(forPID: pid, seeking: seeking)
             guard !axWindows.isEmpty else { return [] }
 
-            let cgCandidates = self.enumerator.cgDescriptors(forPID: pid)
             let activeSpaces = activeSpaceIDs()
             let spaceLookup = Self.spaceLookup(for: Set(cgCandidates.map(\.windowID)))
 
@@ -345,7 +351,7 @@ struct WindowDiscovery {
                   let app = NSRunningApplication(processIdentifier: descriptor.ownerPID)
             else { return nil }
             let appElement = AXUIElementCreateApplication(descriptor.ownerPID)
-            guard let axWindow = enumerator.enumerateWindows(forPID: descriptor.ownerPID)
+            guard let axWindow = enumerator.enumerateWindows(forPID: descriptor.ownerPID, seeking: [windowID])
                 .first(where: { axElementWindowID($0) == windowID })
             else { return nil }
             return captureAXWindow(

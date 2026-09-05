@@ -6,8 +6,8 @@ public struct WindowEnumerator {
 
     public init() {}
 
-    public func enumerateWindows(forPID pid: pid_t) -> [AXUIElement] {
-        AXUIElement.allWindows(forPID: pid)
+    public func enumerateWindows(forPID pid: pid_t, seeking: Set<CGWindowID> = []) -> [AXUIElement] {
+        AXUIElement.allWindows(forPID: pid, seeking: seeking)
     }
 
     public func cgDescriptors(forPID pid: pid_t) -> [CGWindowDescriptor] {

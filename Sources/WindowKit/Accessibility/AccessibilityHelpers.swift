@@ -166,10 +166,29 @@ public func isAccessibilityReady() -> Bool {
     }
 }
 
+/// Rate limiting and memory for the brute-force AX token sweep.
+///
+/// Some processes publish CG windows that have no AX element at all (measured:
+/// Stage Manager's `WindowManager` with 13, plus `loginwindow` and agent apps),
+/// so a sweep driven purely by "CG knows a window AX didn't reach" would run to
+/// its time budget for those PIDs on every attempt, forever. Window IDs already
+/// swept for and not found are therefore remembered, and a sweep cut short by
+/// its budget resumes from where it stopped rather than rescanning the prefix.
 private enum BruteForceGate {
     static let lock = NSLock()
     nonisolated(unsafe) static var lastRuns: [pid_t: TimeInterval] = [:]
+    nonisolated(unsafe) static var sweepCursors: [pid_t: UInt64] = [:]
+    nonisolated(unsafe) static var unfindable: [pid_t: Set<CGWindowID>] = [:]
     static let staleInterval: TimeInterval = 60
+    static let maxUnfindablePerPID = 128
+
+    /// Drops window IDs a completed sweep already failed to find.
+    static func pending(pid: pid_t, unreached: Set<CGWindowID>) -> Set<CGWindowID> {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let known = unfindable[pid] else { return unreached }
+        return unreached.subtracting(known)
+    }
 
     static func shouldRun(pid: pid_t) -> Bool {
         lock.lock()
@@ -178,19 +197,62 @@ private enum BruteForceGate {
         return ProcessInfo.processInfo.systemUptime - lastRun > staleInterval
     }
 
-    static func record(pid: pid_t) {
+    static func cursor(pid: pid_t) -> UInt64 {
         lock.lock()
         defer { lock.unlock() }
+        return sweepCursors[pid] ?? 0
+    }
+
+    /// `nextCursor` is nil when the sweep covered the whole token range; only
+    /// then is `stillMissing` durable enough to suppress future sweeps.
+    static func record(pid: pid_t, nextCursor: UInt64?, stillMissing: Set<CGWindowID>) {
+        lock.lock()
+        defer { lock.unlock() }
+
         if lastRuns.count > 512 {
-            lastRuns = lastRuns.filter { kill($0.key, 0) == 0 }
+            let live = Set(lastRuns.keys.filter { kill($0, 0) == 0 })
+            lastRuns = lastRuns.filter { live.contains($0.key) }
+            sweepCursors = sweepCursors.filter { live.contains($0.key) }
+            unfindable = unfindable.filter { live.contains($0.key) }
         }
+
         lastRuns[pid] = ProcessInfo.processInfo.systemUptime
+
+        guard let nextCursor else {
+            sweepCursors[pid] = 0
+            guard !stillMissing.isEmpty else { return }
+            var known = unfindable[pid] ?? []
+            known.formUnion(stillMissing)
+            if known.count > maxUnfindablePerPID {
+                known = Set(known.sorted().suffix(maxUnfindablePerPID))
+            }
+            unfindable[pid] = known
+            return
+        }
+
+        sweepCursors[pid] = nextCursor
     }
 }
 
 extension AXUIElement {
+    /// Highest AX element token probed by the brute-force sweep. An app numbers
+    /// its AX elements from a counter covering every element it has ever vended,
+    /// not just windows, so a long-lived app's newer windows sit far above the
+    /// window count (measured: a Firefox window at token 13066).
+    private static let bruteForceTokenLimit: UInt64 = 65536
+
+    /// Wall-clock ceiling for one sweep. A window ID present in the CG list with
+    /// no AX element behind it can never be found, and without this the sweep
+    /// would run to the token limit on every attempt.
+    private static let bruteForceTimeBudget: TimeInterval = 0.5
+
     /// AX enumeration with brute-force fallback for windows AX misses.
-    public static func allWindows(forPID pid: pid_t) -> [AXUIElement] {
+    ///
+    /// `seeking` is the set of window IDs the caller knows exist (from the CG
+    /// window list) and wants elements for. The brute-force sweep runs only when
+    /// `kAXWindows` failed to account for one of them, and stops as soon as they
+    /// are all found. Passing an empty set skips the sweep entirely.
+    public static func allWindows(forPID pid: pid_t, seeking: Set<CGWindowID> = []) -> [AXUIElement] {
         var resultSet = Set<AXUIElement>()
 
         let appElement = application(pid: pid)
@@ -199,19 +261,60 @@ extension AXUIElement {
             resultSet.formUnion(windows)
         }
 
-        if BruteForceGate.shouldRun(pid: pid) {
-            let bruteForceWindows = enumerateWindowsByBruteForce(pid: pid)
-            BruteForceGate.record(pid: pid)
-            resultSet.formUnion(bruteForceWindows)
+        var unreached = seeking
+        for element in resultSet {
+            if let windowID = axElementWindowID(element) {
+                unreached.remove(windowID)
+            }
         }
+
+        unreached = BruteForceGate.pending(pid: pid, unreached: unreached)
+        guard !unreached.isEmpty, BruteForceGate.shouldRun(pid: pid) else {
+            return Array(resultSet)
+        }
+
+        let sweep = enumerateWindowsByBruteForce(
+            pid: pid,
+            seeking: unreached,
+            from: BruteForceGate.cursor(pid: pid)
+        )
+        BruteForceGate.record(pid: pid, nextCursor: sweep.nextCursor, stillMissing: sweep.stillMissing)
+        resultSet.formUnion(sweep.elements)
 
         return Array(resultSet)
     }
 
-    private static func enumerateWindowsByBruteForce(pid: pid_t) -> [AXUIElement] {
+    /// Walks AX element tokens looking for the windows in `seeking`.
+    ///
+    /// Deliberately does NOT stop on consecutive attribute failures: tokens are
+    /// sparse, and the gaps between live elements are far wider than any small
+    /// failure run (measured: bailing after two failures stops at token 4 and
+    /// finds nothing for Firefox).
+    private static func enumerateWindowsByBruteForce(
+        pid: pid_t,
+        seeking: Set<CGWindowID>,
+        from cursor: UInt64
+    ) -> (elements: [AXUIElement], stillMissing: Set<CGWindowID>, nextCursor: UInt64?) {
         var results: [AXUIElement] = []
+        var unreached = seeking
+        let deadline = ProcessInfo.processInfo.systemUptime + bruteForceTimeBudget
+        var sinceClockRead = 0
+        let start = cursor < bruteForceTokenLimit ? cursor : 0
 
-        for elementID: UInt64 in 0 ..< 1000 {
+        for elementID in start ..< bruteForceTokenLimit {
+            if unreached.isEmpty {
+                return (results, [], nil)
+            }
+
+            sinceClockRead += 1
+            if sinceClockRead >= 256 {
+                sinceClockRead = 0
+                if ProcessInfo.processInfo.systemUptime >= deadline {
+                    Logger.debug("Brute-force sweep paused on time budget", details: "pid=\(pid), token=\(elementID), unreached=\(unreached.count)")
+                    return (results, unreached, elementID)
+                }
+            }
+
             guard let element = axCreateElementFromToken(pid, elementID) else { continue }
 
             guard let subrole = try? element.subrole(),
@@ -220,10 +323,15 @@ extension AXUIElement {
                 continue
             }
 
+            guard let windowID = axElementWindowID(element), unreached.contains(windowID) else {
+                continue
+            }
+
+            unreached.remove(windowID)
             results.append(element)
         }
 
-        return results
+        return (results, unreached, nil)
     }
 }
 
