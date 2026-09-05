@@ -66,7 +66,13 @@ public final class WindowTracker {
     private static let lateWindowRescanDelays: [TimeInterval] = [3.0, 8.0]
 
     private static let spaceScanMinInterval: TimeInterval = 120
+
+    /// An app posts `didActivateApplication` before its AX server has moved
+    /// `kAXFocusedWindow` to the window being raised, so the activation-time
+    /// read is deferred past the focus notification that supersedes it.
+    private static let activationFocusSettleDelay: Duration = .milliseconds(300)
     private let spaceScanState = OSAllocatedUnfairLock(initialState: (lastScan: TimeInterval(0), trailingScheduled: false))
+    private let lastFocusNotification = OSAllocatedUnfairLock(initialState: [pid_t: TimeInterval]())
 
     // Destroy burst tapering — escalating debounce per PID
     private static let destroyMinInterval: Duration = .milliseconds(50)
@@ -197,6 +203,7 @@ public final class WindowTracker {
         for pid in newPIDs.subtracting(oldPIDs) {
             watcherManager?.unwatch(pid: pid)
             watchRetryAttempts.withLockUnchecked { _ = $0.removeValue(forKey: pid) }
+            lastFocusNotification.withLockUnchecked { _ = $0.removeValue(forKey: pid) }
             let windows = repository.readCache(forPID: pid)
             repository.removeAll(forPID: pid)
             repository.registerPID(pid)
@@ -578,7 +585,13 @@ public final class WindowTracker {
             repository.registerPID(app.processIdentifier)
             guard !repository.isExcludedOrIgnored(app.processIdentifier) else { break }
             ensureWatching(pid: app.processIdentifier, reason: "applicationActivated")
-            touchFocusedWindow(for: app)
+            let activatedAt = ProcessInfo.processInfo.systemUptime
+            debounce(key: "activation-focus-\(app.processIdentifier)", interval: Self.activationFocusSettleDelay) { [weak self] in
+                guard let self else { return }
+                let notified = lastFocusNotification.withLockUnchecked { $0[app.processIdentifier] } ?? 0
+                guard notified < activatedAt else { return }
+                touchFocusedWindow(for: app)
+            }
             debounce(key: "refresh-\(app.processIdentifier)") { [weak self] in
                 _ = await self?.trackApplication(app)
             }
@@ -857,13 +870,10 @@ public final class WindowTracker {
                 emitChanges(changes)
             }
 
-        case .windowFocused(let element):
-            guard isLiveFocusedWindow(element, pid: pid) else { break }
-            updateWindowTimestamp(windowID: try? element.windowID(), pid: pid)
-
-        case .mainWindowChanged(let element):
-            guard (try? element.isMainWindow()) == true else { break }
-            updateWindowTimestamp(windowID: try? element.windowID(), pid: pid)
+        case .windowFocused(let element), .mainWindowChanged(let element):
+            lastFocusNotification.withLockUnchecked { $0[pid] = ProcessInfo.processInfo.systemUptime }
+            let windowID = try? element.windowID()
+            updateWindowTimestamp(windowID: windowID, pid: pid)
 
         case .titleChanged(let element):
             // Coalesced: apps rewriting their title continuously would starve
@@ -938,18 +948,6 @@ public final class WindowTracker {
             windows.insert(updated)
         }
         emitChanges(changes)
-    }
-
-    /// AppKit posts focus and main-window notifications from BOTH the window
-    /// resigning the role and the one assuming it, so the element a notification
-    /// carries is not proof that window is now frontmost.
-    private func isLiveFocusedWindow(_ element: AXUIElement, pid: pid_t) -> Bool {
-        guard let focused = try? AXUIElement.application(pid: pid).focusedWindow() else { return false }
-        if focused == element { return true }
-        guard let focusedID = try? focused.windowID(), let elementID = try? element.windowID() else {
-            return false
-        }
-        return focusedID == elementID
     }
 
     private func updateWindowTimestamp(windowID: CGWindowID?, pid: pid_t) {
