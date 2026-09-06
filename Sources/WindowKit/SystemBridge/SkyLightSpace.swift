@@ -240,13 +240,24 @@ extension CapturedWindow {
     }
 }
 
-/// A shown, unmanaged Space at the default absolute level. Windows added to it
-/// are composited over every managed Space on every display and take no part
-/// in Space transitions: they neither slide with an outgoing Space nor
-/// re-appear at commit, which is how the native Dock and menu bar behave.
+/// A shown, unmanaged Space above the managed Spaces. Windows added to it are
+/// composited over every managed Space on every display and take no part in
+/// Space transitions: they neither slide with an outgoing Space nor re-appear
+/// at commit, which is how the native Dock and menu bar behave.
 /// Uses raw SkyLight calls, which work for the calling process's own windows
 /// (foreign windows need the bridged `WindowStash` path). The Space outlives
 /// the process until logout; keep one per process.
+///
+/// The absolute level is load-bearing. At `.default` (0) the WindowServer
+/// composites a Space commit's window band OVER this Space: measured on a
+/// Mission Control exit onto another desktop Space, the window kept alpha 1 in
+/// every channel and stayed ordered in, while `occlusionState` lost `.visible`
+/// for ~170ms with the outgoing Space's windows ordered above it — a visible
+/// flicker as the new Space settles. `.setupAssistant` (100) clears that band
+/// and is the lowest named level that does. Do NOT raise it further: the levels
+/// above are the system shields (200 security agent, 300 screen lock, 400 the
+/// lock screen's Notification Center, which `WindowStash` already uses), and a
+/// dock Space at those levels would draw over the lock screen.
 @MainActor
 public final class WindowOverlaySpace {
     public let id: CGSSpaceID
@@ -257,8 +268,9 @@ public final class WindowOverlaySpace {
         guard let spaceID = slsCreateSpace(connection) else {
             throw WindowSpaceError.operationUnavailable("SLSSpaceCreate")
         }
-        slsSetSpaceAbsoluteLevel(connection, spaceID, .default)
+        slsSetSpaceAbsoluteLevel(connection, spaceID, .setupAssistant)
         slsShowSpaces(connection, [spaceID])
+        Logger.info("WindowOverlaySpace: created space \(spaceID) at level 100")
         id = spaceID
     }
 
