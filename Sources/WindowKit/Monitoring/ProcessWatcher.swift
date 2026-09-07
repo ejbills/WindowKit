@@ -71,6 +71,18 @@ public final class ProcessWatcher {
         NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }
     }
 
+    /// Non-regular agents whose launch and termination are reported like
+    /// regular apps (see `FloatingAgentWatcher`).
+    var floatingAgentBundleIDs: Set<String> = []
+
+    func runningFloatingAgents() -> [NSRunningApplication] {
+        NSWorkspace.shared.runningApplications.filter(isFloatingAgent)
+    }
+
+    func isFloatingAgent(_ app: NSRunningApplication) -> Bool {
+        !floatingAgentBundleIDs.isEmpty && app.bundleIdentifier.map(floatingAgentBundleIDs.contains) == true
+    }
+
     /// Event-driven backstop for apps the NSWorkspace notifications miss.
     /// Processes spawned by exec'ing an app binary directly (Bambu Studio project
     /// windows, Parallels Coherence winapps) never fire
@@ -94,7 +106,7 @@ public final class ProcessWatcher {
             pidsByIdentity[identity] = (app, pid)
             currentPIDs.insert(pid)
             guard !knownPIDs.contains(pid) else { continue }
-            if app.activationPolicy == .regular {
+            if app.activationPolicy == .regular || isFloatingAgent(app) {
                 markLaunched(app)
             } else if pendingPolicyObservations[pid] == nil {
                 observePolicyFlip(of: app)

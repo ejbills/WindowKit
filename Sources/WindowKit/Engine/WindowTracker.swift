@@ -13,11 +13,9 @@ public final class WindowTracker {
 
     private let eventSubject = PassthroughSubject<WindowEvent, Never>()
 
-    public var menuEvents: AnyPublisher<MenuEvent, Never> {
-        menuSubject.eraseToAnyPublisher()
-    }
+    public var agentWindowEvents: AnyPublisher<AgentWindowsEvent, Never> { floatingAgents.events }
 
-    private let menuSubject = PassthroughSubject<MenuEvent, Never>()
+    private let floatingAgents = FloatingAgentWatcher()
     var headless: Bool = false {
         didSet { discovery.screenshotService.headless = headless }
     }
@@ -139,6 +137,9 @@ public final class WindowTracker {
                 }
             }
             .store(in: &subscriptions)
+
+        processWatcher.floatingAgentBundleIDs = FloatingAgentWatcher.bundleIDs
+        processWatcher.runningFloatingAgents().forEach(floatingAgents.watch)
 
         let apps = processWatcher.runningApplications()
         Logger.debug("Found running applications", details: "count=\(apps.count)")
@@ -561,6 +562,10 @@ public final class WindowTracker {
             break
 
         case .applicationLaunched(let app):
+            if processWatcher.isFloatingAgent(app) {
+                floatingAgents.watch(app)
+                break
+            }
             repository.registerPID(app.processIdentifier)
             if !excludedBundleIDs.isEmpty, let bundleID = app.bundleIdentifier, excludedBundleIDs.contains(bundleID) {
                 repository.insertExcludedPID(app.processIdentifier)
@@ -577,6 +582,7 @@ public final class WindowTracker {
             }
 
         case .applicationTerminated(let pid):
+            floatingAgents.forget(pid: pid)
             repository.removeExcludedPID(pid)
             watchRetryAttempts.withLockUnchecked { _ = $0.removeValue(forKey: pid) }
             watcherManager?.unwatch(pid: pid)
@@ -759,14 +765,6 @@ public final class WindowTracker {
         switch event {
         case .windowCreated, .windowDestroyed:
             eventSubject.send(.windowActivityDetected(pid))
-        case .menuOpened(let menu):
-            if let origin = try? menu.position(), let size = try? menu.size() {
-                menuSubject.send(.opened(pid: pid, menu: menu, frame: CGRect(origin: origin, size: size)))
-            }
-            return
-        case .menuClosed(let menu):
-            menuSubject.send(.closed(pid: pid, menu: menu))
-            return
         default:
             break
         }
@@ -888,9 +886,6 @@ public final class WindowTracker {
             lastFocusNotification.withLockUnchecked { $0[pid] = ProcessInfo.processInfo.systemUptime }
             let windowID = try? element.windowID()
             updateWindowTimestamp(windowID: windowID, pid: pid)
-
-        case .menuOpened, .menuClosed:
-            break
 
         case .titleChanged(let element):
             // Coalesced: apps rewriting their title continuously would starve

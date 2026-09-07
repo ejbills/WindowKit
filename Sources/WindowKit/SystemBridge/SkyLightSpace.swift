@@ -268,11 +268,15 @@ extension CapturedWindow {
 ///   press alone must NOT lower: clicking an icon that activates an app on
 ///   another Space commits that Space with the button down, which brought the
 ///   flicker back on every such click.
-/// - A covering window is a menu of a tracked app whose frame intersects a
-///   visible member, from `WindowKit.menuEvents` (the documented
-///   `AXMenuOpened`/`AXMenuClosed` notifications). Menus are the case that
-///   matters: they are the only system windows that both land over the dock
-///   and get cut off there.
+/// - A covering window is detected two ways, each for what only it sees. The
+///   SkyLight Space-membership events report every process's windows joining
+///   and leaving Spaces: a foreign on-screen window at a level above every
+///   visible member's, intersecting one, counts until its last leave. That
+///   catches menus and tooltips from any app, tracked or not. Floating
+///   agents' windows (the Screenshot toolbar and thumbnail) join no Space and
+///   fire nothing there, so their live frames come from
+///   `WindowKit.agentWindowEvents` instead. No event exists for foreign
+///   window moves or z-order changes.
 ///
 /// Do not raise `elevatedLevel` past 100: 200/300/400 are the system shields
 /// (`WindowStash` uses 400) and a Space there would draw over the lock screen.
@@ -290,14 +294,21 @@ public final class WindowOverlaySpace {
     private var monitors: [Any] = []
     private var dragPasteboardBaseline = 0
     private var dragInFlight = false
-    private var menuSubscriptions = Set<AnyCancellable>()
+    private let ownPID = getpid()
+    private var membershipNotifier: SkyLightConnectionNotifier?
+    private var agentSubscription: AnyCancellable?
 
     /// Windows this process has moved into the Space, held weakly.
     private let members = NSHashTable<NSWindow>.weakObjects()
 
-    /// Open menus of tracked apps, by menu element, with the owning pid and
-    /// the menu frame in AX coordinates.
-    private var openMenus: [AXUIElement: (pid: pid_t, frame: CGRect)] = [:]
+    /// Foreign windows found covering a member when they joined a Space, with
+    /// the number of Spaces each is on. A menu joins every shown Space and
+    /// leaves all but the current one within the same millisecond, so a window
+    /// is released only when its last leave lands.
+    private var coveringWindows: [CGWindowID: Int] = [:]
+
+    /// Floating agents' window frames by pid, in AX coordinates.
+    private var agentFrames: [pid_t: [CGRect]] = [:]
 
     /// The pending press poll or restore. They are mutually exclusive - a press
     /// cancels a pending restore, a release ends the poll - so one slot holds
@@ -331,7 +342,7 @@ public final class WindowOverlaySpace {
         id = spaceID
 
         installDragRoutingGate()
-        installMenuGate()
+        installCoveringGate()
         if NSEvent.pressedMouseButtons != 0 {
             dragPasteboardBaseline = dragPasteboard.changeCount
             checkPress()
@@ -339,10 +350,9 @@ public final class WindowOverlaySpace {
     }
 
     deinit {
-        let pendingCheck = scheduledCheck
+        scheduledCheck?.cancel()
         let installedMonitors = monitors
         DispatchQueue.main.async {
-            pendingCheck?.cancel()
             installedMonitors.forEach(NSEvent.removeMonitor)
         }
     }
@@ -380,48 +390,62 @@ public final class WindowOverlaySpace {
         }
     }
 
-    /// Follows menus opening and closing in tracked apps. A menu whose frame
-    /// overlaps a visible member lowers the Space until it closes; a closed
-    /// notification that never arrives is bounded by the app's termination.
-    private func installMenuGate() {
+    private func installCoveringGate() {
         guard elevatedLevel != Self.routingLevel else { return }
 
-        WindowKit.shared.menuEvents
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] event in
-                MainActor.assumeIsolated { self?.handleMenuEvent(event) }
-            }
-            .store(in: &menuSubscriptions)
-
-        WindowKit.shared.processEvents
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] event in
-                guard case .applicationTerminated(let pid) = event else { return }
-                MainActor.assumeIsolated { self?.forgetMenus(ofPID: pid) }
-            }
-            .store(in: &menuSubscriptions)
-    }
-
-    private func handleMenuEvent(_ event: MenuEvent) {
-        switch event {
-        case .opened(let pid, let menu, let frame):
-            openMenus[menu] = (pid, frame)
-        case .closed(_, let menu):
-            openMenus[menu] = nil
+        membershipNotifier = SkyLightConnectionNotifier(events: [.windowAddedToSpace, .windowRemovedFromSpace]) { [weak self] event, payload in
+            guard let windowID = SkyLightEvent.windowID(in: payload) else { return }
+            self?.handleMembershipEvent(event, windowID: windowID)
         }
-        applyLevel()
+
+        agentSubscription = WindowKit.shared.agentWindowEvents
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] event in
+                MainActor.assumeIsolated {
+                    self?.agentFrames[event.pid] = event.frames.isEmpty ? nil : event.frames
+                    self?.applyLevel()
+                }
+            }
     }
 
-    private func forgetMenus(ofPID pid: pid_t) {
-        openMenus = openMenus.filter { $0.value.pid != pid }
-        applyLevel()
+    private func handleMembershipEvent(_ event: SkyLightEvent, windowID: CGWindowID) {
+        switch event {
+        case .windowAddedToSpace:
+            if let count = coveringWindows[windowID] {
+                coveringWindows[windowID] = count + 1
+            } else if isCoveringMember(windowID) {
+                coveringWindows[windowID] = 1
+                applyLevel()
+            }
+        case .windowRemovedFromSpace:
+            guard let count = coveringWindows[windowID] else { return }
+            if count > 1 {
+                coveringWindows[windowID] = count - 1
+            } else {
+                coveringWindows[windowID] = nil
+                applyLevel()
+            }
+        default:
+            break
+        }
     }
 
-    /// Whether an open menu overlaps a visible member window.
-    private var isCoveredByMenu: Bool {
-        guard !openMenus.isEmpty else { return false }
+    /// Whether a foreign on-screen window sits at a level above every visible
+    /// member and overlaps one. One WindowServer lookup, for the foreign window;
+    /// the members are this process's own windows and AppKit answers for them.
+    private func isCoveringMember(_ windowID: CGWindowID) -> Bool {
+        let visible = members.allObjects.filter(\.isVisible)
+        guard let memberLevel = visible.map(\.level.rawValue).max(),
+              let window = cgWindowDescriptor(forWindowID: windowID),
+              window.ownerPID != ownPID, window.isOnScreen, window.layer > memberLevel else { return false }
+        return visible.contains { ScreenCoordinates.axRect(fromAppKit: $0.frame).intersects(window.bounds) }
+    }
+
+    /// Whether a floating agent window overlaps a visible member.
+    private var isCoveredByAgent: Bool {
+        guard !agentFrames.isEmpty else { return false }
         let visible = members.allObjects.filter(\.isVisible).map { ScreenCoordinates.axRect(fromAppKit: $0.frame) }
-        return openMenus.values.contains { menu in visible.contains { $0.intersects(menu.frame) } }
+        return agentFrames.values.joined().contains { frame in visible.contains { $0.intersects(frame) } }
     }
 
     private func handleMouseEvent(_ event: NSEvent) {
@@ -465,7 +489,7 @@ public final class WindowOverlaySpace {
     }
 
     private func applyLevel() {
-        setLevel(dragInFlight || isCoveredByMenu ? Self.routingLevel : elevatedLevel)
+        setLevel(dragInFlight || !coveringWindows.isEmpty || isCoveredByAgent ? Self.routingLevel : elevatedLevel)
     }
 
     private func schedule(after delay: TimeInterval, _ body: @escaping (WindowOverlaySpace) -> Void) {
@@ -481,6 +505,7 @@ public final class WindowOverlaySpace {
 
     private func setLevel(_ level: Int32) {
         guard level != currentLevel else { return }
+        Logger.debug("Overlay Space level \(currentLevel) -> \(level)", details: "drag=\(dragInFlight), covering=\(Array(coveringWindows.keys)), agents=\(agentFrames)")
         currentLevel = level
         slsSetSpaceAbsoluteLevel(connection, id, level)
     }

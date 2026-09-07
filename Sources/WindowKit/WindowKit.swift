@@ -241,8 +241,9 @@ public final class WindowKit {
 
     public var processEvents: AnyPublisher<ProcessEvent, Never> { tracker.processEvents }
 
-    /// Menus opening and closing in tracked apps.
-    public var menuEvents: AnyPublisher<MenuEvent, Never> { tracker.menuEvents }
+    /// Live window frames of floating system agents (the Screenshot toolbar
+    /// and thumbnail), see `FloatingAgentWatcher`.
+    public var agentWindowEvents: AnyPublisher<AgentWindowsEvent, Never> { tracker.agentWindowEvents }
 
     public private(set) var frontmostApplication: NSRunningApplication?
     public private(set) var trackedApplications: [NSRunningApplication] = []

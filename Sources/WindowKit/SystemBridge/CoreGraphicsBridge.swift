@@ -373,15 +373,15 @@ public func cgOnScreenWindowDescriptors() -> [CGWindowDescriptor] {
     }
 }
 
+/// One window's description by ID, from the per-window list option rather
+/// than a full list scan. `CGWindowListCreateDescriptionFromArray` is not
+/// used: on macOS 27 it returns an empty array for every input built from
+/// Swift (NSNumber, CFNumber of any width, raw CFArray).
 public func cgWindowDescriptor(forWindowID id: CGWindowID) -> CGWindowDescriptor? {
-    guard let windowList = CGWindowListCopyWindowInfo([.excludeDesktopElements], kCGNullWindowID) as? [[String: AnyObject]] else {
+    guard let list = CGWindowListCopyWindowInfo([.optionIncludingWindow], id) as? [[String: AnyObject]] else {
         return nil
     }
-    for dict in windowList {
-        guard let descriptor = CGWindowDescriptor(from: dict), descriptor.windowID == id else { continue }
-        return descriptor
-    }
-    return nil
+    return list.lazy.compactMap(CGWindowDescriptor.init(from:)).first { $0.windowID == id }
 }
 
 // MARK: - SkyLight Space Management

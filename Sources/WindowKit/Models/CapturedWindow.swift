@@ -382,14 +382,6 @@ struct FallbackWindowSource: WindowPropertySource {
     var windowLayer: Int { 0 }
 }
 
-/// A menu (context menu, menubar menu, popup button) opening or closing in a
-/// tracked app, from the documented `AXMenuOpened`/`AXMenuClosed`
-/// notifications. `frame` is in AX (top-left origin) coordinates.
-public enum MenuEvent: @unchecked Sendable {
-    case opened(pid: pid_t, menu: AXUIElement, frame: CGRect)
-    case closed(pid: pid_t, menu: AXUIElement)
-}
-
 public enum WindowEvent: Sendable {
     case windowAppeared(CapturedWindow)
     case windowDisappeared(CGWindowID)
