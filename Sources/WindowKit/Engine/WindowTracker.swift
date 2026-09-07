@@ -15,7 +15,7 @@ public final class WindowTracker {
 
     public var agentWindowEvents: AnyPublisher<AgentWindowsEvent, Never> { floatingAgents.events }
 
-    private let floatingAgents = FloatingAgentWatcher()
+    private lazy var floatingAgents = FloatingAgentWatcher(axQueue: axQueue)
     var headless: Bool = false {
         didSet { discovery.screenshotService.headless = headless }
     }

@@ -22,7 +22,15 @@ final class FloatingAgentWatcher {
     var events: AnyPublisher<AgentWindowsEvent, Never> { subject.eraseToAnyPublisher() }
 
     private let subject = PassthroughSubject<AgentWindowsEvent, Never>()
+    private let axQueue: DispatchQueue
     private var watchers: [pid_t: (watcher: AccessibilityWatcher, subscription: AnyCancellable)] = [:]
+
+    /// `axQueue` is the tracker's serial AX queue, so these reads share its
+    /// discipline: never on main, never on the notification-delivery queue,
+    /// bounded by the tracker's process-wide AX messaging timeout.
+    init(axQueue: DispatchQueue) {
+        self.axQueue = axQueue
+    }
 
     func watch(_ agent: NSRunningApplication) {
         let pid = agent.processIdentifier
@@ -30,7 +38,7 @@ final class FloatingAgentWatcher {
         let subscription = watcher.events.sink { [weak self] event in
             switch event {
             case .windowCreated, .windowDestroyed:
-                DispatchQueue.main.async { self?.publishFrames(of: pid) }
+                self?.axQueue.async { self?.publishFrames(of: pid) }
             default:
                 break
             }
@@ -44,7 +52,6 @@ final class FloatingAgentWatcher {
     }
 
     private func publishFrames(of pid: pid_t) {
-        guard watchers[pid] != nil else { return }
         let windows = (try? AXUIElement.application(pid: pid).windows()) ?? []
         let frames = windows.compactMap { window -> CGRect? in
             guard let origin = try? window.position(), let size = try? window.size() else { return nil }

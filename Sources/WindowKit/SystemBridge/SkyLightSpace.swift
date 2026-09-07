@@ -270,9 +270,9 @@ extension CapturedWindow {
 ///   flicker back on every such click.
 /// - A covering window is detected two ways, each for what only it sees. The
 ///   SkyLight Space-membership events report every process's windows joining
-///   and leaving Spaces: a foreign on-screen window at a level above every
-///   visible member's, intersecting one, counts until its last leave. That
-///   catches menus and tooltips from any app, tracked or not. Floating
+///   and leaving Spaces: a foreign on-screen window at the popup-menu level
+///   intersecting a visible member counts until its last leave. That catches
+///   context menus from any app, tracked or not, and nothing else. Floating
 ///   agents' windows (the Screenshot toolbar and thumbnail) join no Space and
 ///   fire nothing there, so their live frames come from
 ///   `WindowKit.agentWindowEvents` instead. No event exists for foreign
@@ -430,16 +430,20 @@ public final class WindowOverlaySpace {
         }
     }
 
-    /// Whether a foreign on-screen window sits at a level above every visible
-    /// member and overlaps one. One WindowServer lookup, for the foreign window;
-    /// the members are this process's own windows and AppKit answers for them.
+    /// Whether a foreign on-screen menu window overlaps a visible member. Only
+    /// the popup-menu window level counts: anything else that joins a Space
+    /// above the dock (Mission Control's display-sized window, Launchpad,
+    /// shields) must not lower it, since that puts the Space at 0 for exactly
+    /// the Space commit the elevated level exists to survive. One
+    /// WindowServer lookup, for the foreign window; the members are this
+    /// process's own windows and AppKit answers for them.
     private func isCoveringMember(_ windowID: CGWindowID) -> Bool {
-        let visible = members.allObjects.filter(\.isVisible)
-        guard let memberLevel = visible.map(\.level.rawValue).max(),
-              let window = cgWindowDescriptor(forWindowID: windowID),
-              window.ownerPID != ownPID, window.isOnScreen, window.layer > memberLevel else { return false }
-        return visible.contains { ScreenCoordinates.axRect(fromAppKit: $0.frame).intersects(window.bounds) }
+        guard let window = cgWindowDescriptor(forWindowID: windowID),
+              window.ownerPID != ownPID, window.isOnScreen, window.layer == Self.popUpMenuLevel else { return false }
+        return members.allObjects.contains { $0.isVisible && ScreenCoordinates.axRect(fromAppKit: $0.frame).intersects(window.bounds) }
     }
+
+    private static let popUpMenuLevel = Int(CGWindowLevelForKey(.popUpMenuWindow))
 
     /// Whether a floating agent window overlaps a visible member.
     private var isCoveredByAgent: Bool {
