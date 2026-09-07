@@ -18,6 +18,8 @@ public enum AccessibilityEvent {
     case windowMoved(AXUIElement)
     case titleChanged(AXUIElement)
     case mainWindowChanged(AXUIElement)
+    case menuOpened(AXUIElement)
+    case menuClosed(AXUIElement)
 }
 
 public final class AccessibilityWatcher {
@@ -40,6 +42,8 @@ public final class AccessibilityWatcher {
         kAXWindowMovedNotification,
         kAXTitleChangedNotification,
         kAXMainWindowChangedNotification,
+        kAXMenuOpenedNotification,
+        kAXMenuClosedNotification,
     ]
 
     public init?(pid: pid_t) {
@@ -140,6 +144,20 @@ public final class AccessibilityWatcher {
     }
 
     private func handleNotification(element: AXUIElement, name: String) {
+        // Menu open/close is delivered as-is: a debounced open would leave the
+        // menu unhandled for the debounce interval, and the pair must not
+        // collapse.
+        switch name {
+        case kAXMenuOpenedNotification:
+            eventSubject.send(.menuOpened(element))
+            return
+        case kAXMenuClosedNotification:
+            eventSubject.send(.menuClosed(element))
+            return
+        default:
+            break
+        }
+
         let key = "\(targetPID)-\(name)"
 
         axObserverWorkQueue.async { [weak self] in

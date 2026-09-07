@@ -241,6 +241,9 @@ public final class WindowKit {
 
     public var processEvents: AnyPublisher<ProcessEvent, Never> { tracker.processEvents }
 
+    /// Menus opening and closing in tracked apps.
+    public var menuEvents: AnyPublisher<MenuEvent, Never> { tracker.menuEvents }
+
     public private(set) var frontmostApplication: NSRunningApplication?
     public private(set) var trackedApplications: [NSRunningApplication] = []
     public private(set) var launchingApplications: [NSRunningApplication] = []

@@ -12,6 +12,12 @@ public final class WindowTracker {
     }
 
     private let eventSubject = PassthroughSubject<WindowEvent, Never>()
+
+    public var menuEvents: AnyPublisher<MenuEvent, Never> {
+        menuSubject.eraseToAnyPublisher()
+    }
+
+    private let menuSubject = PassthroughSubject<MenuEvent, Never>()
     var headless: Bool = false {
         didSet { discovery.screenshotService.headless = headless }
     }
@@ -753,6 +759,14 @@ public final class WindowTracker {
         switch event {
         case .windowCreated, .windowDestroyed:
             eventSubject.send(.windowActivityDetected(pid))
+        case .menuOpened(let menu):
+            if let origin = try? menu.position(), let size = try? menu.size() {
+                menuSubject.send(.opened(pid: pid, menu: menu, frame: CGRect(origin: origin, size: size)))
+            }
+            return
+        case .menuClosed(let menu):
+            menuSubject.send(.closed(pid: pid, menu: menu))
+            return
         default:
             break
         }
@@ -874,6 +888,9 @@ public final class WindowTracker {
             lastFocusNotification.withLockUnchecked { $0[pid] = ProcessInfo.processInfo.systemUptime }
             let windowID = try? element.windowID()
             updateWindowTimestamp(windowID: windowID, pid: pid)
+
+        case .menuOpened, .menuClosed:
+            break
 
         case .titleChanged(let element):
             // Coalesced: apps rewriting their title continuously would starve

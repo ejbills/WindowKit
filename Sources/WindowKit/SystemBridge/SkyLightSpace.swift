@@ -1,4 +1,5 @@
 import Cocoa
+import Combine
 import ObjectiveC.runtime
 
 public struct ManagedDisplay: Identifiable, Hashable, Sendable {
@@ -248,31 +249,30 @@ extension CapturedWindow {
 /// (foreign windows need the bridged `WindowStash` path). The Space outlives
 /// the process until logout; keep one per process.
 ///
-/// The absolute level cannot be picked once and left. Two measured facts pull
-/// in opposite directions:
+/// The absolute level moves, because no single level works (all measured):
 ///
-/// - At level 0 the WindowServer composites a Space commit's window band OVER
-///   this Space. The window keeps alpha 1 and stays ordered in, but
-///   `occlusionState` loses `.visible` for ~170ms behind the outgoing Space's
-///   windows: the flicker as a new desktop Space settles after Mission Control.
-///   Raising the level clears the band.
-/// - Drag destination routing reaches ONLY Spaces at level 0. Above it the
-///   WindowServer never offers the Space's windows to a drag, so no
-///   `NSDraggingDestination` in them sees `draggingEntered`. Levels 1, 2, 10,
-///   25, 50, 75 and 99 were probed with a synthetic drag: every one of them is
-///   blocked, so there is no compromise level to settle on.
+/// - At level 0 a Space commit's window band composites OVER this Space:
+///   `occlusionState` loses `.visible` for ~170ms as a new desktop Space
+///   settles after Mission Control, a visible flicker. Any higher level
+///   clears it.
+/// - Above level 0 no drag reaches the Space (levels 1, 2, 10, 25, 50, 75 and
+///   99 all block `draggingEntered`), and the Space's windows composite over
+///   every managed-Space window regardless of window level, so a menu or
+///   tooltip overlapping them is drawn underneath.
 ///
-/// So the level moves. The Space rests at `elevatedLevel` and drops to 0 only
-/// while a drag is actually in flight, detected from the drag pasteboard's
-/// `changeCount`. Routing is re-evaluated per drag event rather than latched at
-/// drag start, so lowering after the drag has begun still routes it (measured),
-/// which is what makes the lazy detection safe.
+/// So the Space rests at `elevatedLevel` and drops to 0 while a drag is in
+/// flight or a foreign window is covering a member:
 ///
-/// A press is deliberately NOT enough to lower: clicking a dock icon that
-/// activates an app on another Space commits that Space with the button still
-/// down, so lowering on press reproduced the flicker on every such click.
-/// The residual is a Space commit during a real drag, which keeps the old
-/// flicker and is the rarest case of the three.
+/// - A drag is detected from the drag pasteboard's `changeCount`; routing is
+///   re-evaluated per drag event, so lowering mid-drag still routes it. A
+///   press alone must NOT lower: clicking an icon that activates an app on
+///   another Space commits that Space with the button down, which brought the
+///   flicker back on every such click.
+/// - A covering window is a menu of a tracked app whose frame intersects a
+///   visible member, from `WindowKit.menuEvents` (the documented
+///   `AXMenuOpened`/`AXMenuClosed` notifications). Menus are the case that
+///   matters: they are the only system windows that both land over the dock
+///   and get cut off there.
 ///
 /// Do not raise `elevatedLevel` past 100: 200/300/400 are the system shields
 /// (`WindowStash` uses 400) and a Space there would draw over the lock screen.
@@ -280,8 +280,8 @@ extension CapturedWindow {
 public final class WindowOverlaySpace {
     public let id: CGSSpaceID
 
-    /// Level the Space rests at when no drag is in flight. 0 pins the Space at
-    /// the drag-routing level for its lifetime and disables the gate.
+    /// Level the Space rests at when nothing forces it down. 0 pins the Space
+    /// at the routing level for its lifetime and disables both gates.
     public let elevatedLevel: Int32
 
     private let connection: CGSConnectionID
@@ -289,13 +289,22 @@ public final class WindowOverlaySpace {
     private var currentLevel: Int32
     private var monitors: [Any] = []
     private var dragPasteboardBaseline = 0
+    private var dragInFlight = false
+    private var menuSubscriptions = Set<AnyCancellable>()
+
+    /// Windows this process has moved into the Space, held weakly.
+    private let members = NSHashTable<NSWindow>.weakObjects()
+
+    /// Open menus of tracked apps, by menu element, with the owning pid and
+    /// the menu frame in AX coordinates.
+    private var openMenus: [AXUIElement: (pid: pid_t, frame: CGRect)] = [:]
 
     /// The pending press poll or restore. They are mutually exclusive - a press
     /// cancels a pending restore, a release ends the poll - so one slot holds
     /// both, and scheduling either cancels whatever was in flight.
     private var scheduledCheck: DispatchWorkItem?
 
-    private static let dragRoutingLevel: Int32 = 0
+    private static let routingLevel: Int32 = 0
 
     /// Interval the press check runs at. It exists only between a press and its
     /// release.
@@ -322,6 +331,7 @@ public final class WindowOverlaySpace {
         id = spaceID
 
         installDragRoutingGate()
+        installMenuGate()
         if NSEvent.pressedMouseButtons != 0 {
             dragPasteboardBaseline = dragPasteboard.changeCount
             checkPress()
@@ -347,7 +357,7 @@ public final class WindowOverlaySpace {
     /// would break every drop into it. Stay at the routing level in that case
     /// and accept the commit flicker.
     private func installDragRoutingGate() {
-        guard elevatedLevel != Self.dragRoutingLevel else { return }
+        guard elevatedLevel != Self.routingLevel else { return }
 
         let mask: NSEvent.EventTypeMask = [
             .leftMouseDown, .rightMouseDown, .otherMouseDown,
@@ -357,7 +367,7 @@ public final class WindowOverlaySpace {
         guard let globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask, handler: { [weak self] event in
             MainActor.assumeIsolated { self?.handleMouseEvent(event) }
         }) else {
-            setLevel(Self.dragRoutingLevel)
+            setLevel(Self.routingLevel)
             return
         }
         monitors.append(globalMonitor)
@@ -368,6 +378,50 @@ public final class WindowOverlaySpace {
         }) {
             monitors.append(localMonitor)
         }
+    }
+
+    /// Follows menus opening and closing in tracked apps. A menu whose frame
+    /// overlaps a visible member lowers the Space until it closes; a closed
+    /// notification that never arrives is bounded by the app's termination.
+    private func installMenuGate() {
+        guard elevatedLevel != Self.routingLevel else { return }
+
+        WindowKit.shared.menuEvents
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] event in
+                MainActor.assumeIsolated { self?.handleMenuEvent(event) }
+            }
+            .store(in: &menuSubscriptions)
+
+        WindowKit.shared.processEvents
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] event in
+                guard case .applicationTerminated(let pid) = event else { return }
+                MainActor.assumeIsolated { self?.forgetMenus(ofPID: pid) }
+            }
+            .store(in: &menuSubscriptions)
+    }
+
+    private func handleMenuEvent(_ event: MenuEvent) {
+        switch event {
+        case .opened(let pid, let menu, let frame):
+            openMenus[menu] = (pid, frame)
+        case .closed(_, let menu):
+            openMenus[menu] = nil
+        }
+        applyLevel()
+    }
+
+    private func forgetMenus(ofPID pid: pid_t) {
+        openMenus = openMenus.filter { $0.value.pid != pid }
+        applyLevel()
+    }
+
+    /// Whether an open menu overlaps a visible member window.
+    private var isCoveredByMenu: Bool {
+        guard !openMenus.isEmpty else { return false }
+        let visible = members.allObjects.filter(\.isVisible).map { ScreenCoordinates.axRect(fromAppKit: $0.frame) }
+        return openMenus.values.contains { menu in visible.contains { $0.intersects(menu.frame) } }
     }
 
     private func handleMouseEvent(_ event: NSEvent) {
@@ -388,24 +442,30 @@ public final class WindowOverlaySpace {
     /// from a process that was neither the drag's source nor its destination.
     private func checkPress() {
         guard NSEvent.pressedMouseButtons != 0 else {
-            if currentLevel != elevatedLevel {
-                schedule(after: Self.restoreDelay) { $0.restore() }
+            if dragInFlight {
+                schedule(after: Self.restoreDelay) { $0.restoreAfterDrag() }
             }
             return
         }
 
-        if currentLevel != Self.dragRoutingLevel, dragPasteboard.changeCount != dragPasteboardBaseline {
-            setLevel(Self.dragRoutingLevel)
+        if !dragInFlight, dragPasteboard.changeCount != dragPasteboardBaseline {
+            dragInFlight = true
+            applyLevel()
         }
         schedule(after: Self.pressPollInterval) { $0.checkPress() }
     }
 
-    private func restore() {
+    private func restoreAfterDrag() {
         guard NSEvent.pressedMouseButtons == 0 else {
             checkPress()
             return
         }
-        setLevel(elevatedLevel)
+        dragInFlight = false
+        applyLevel()
+    }
+
+    private func applyLevel() {
+        setLevel(dragInFlight || isCoveredByMenu ? Self.routingLevel : elevatedLevel)
     }
 
     private func schedule(after delay: TimeInterval, _ body: @escaping (WindowOverlaySpace) -> Void) {
@@ -427,8 +487,9 @@ public final class WindowOverlaySpace {
 
     /// Moves the window into the overlay Space, removing it from every managed
     /// Space. Call after the window is ordered on screen.
-    public func add(windowID: CGWindowID) {
-        slsSpaceAddWindows(connection, id, [windowID])
+    public func add(_ window: NSWindow) {
+        slsSpaceAddWindows(connection, id, [CGWindowID(window.windowNumber)])
+        members.add(window)
     }
 }
 
