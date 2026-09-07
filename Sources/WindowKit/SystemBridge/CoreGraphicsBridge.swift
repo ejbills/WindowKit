@@ -398,8 +398,16 @@ func slsSetSpaceAbsoluteLevel(
     _ spaceID: CGSSpaceID,
     _ level: SLSSpaceAbsoluteLevel
 ) {
+    slsSetSpaceAbsoluteLevel(connection, spaceID, level.rawValue)
+}
+
+func slsSetSpaceAbsoluteLevel(
+    _ connection: CGSConnectionID,
+    _ spaceID: CGSSpaceID,
+    _ level: Int32
+) {
     loadSkyLightFunctions()
-    spaceSetAbsoluteLevelPtr?(connection, spaceID, level.rawValue)
+    spaceSetAbsoluteLevelPtr?(connection, spaceID, level)
 }
 
 func slsShowSpaces(_ connection: CGSConnectionID, _ spaceIDs: [CGSSpaceID]) {

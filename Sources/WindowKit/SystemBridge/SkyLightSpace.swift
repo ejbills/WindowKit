@@ -248,30 +248,181 @@ extension CapturedWindow {
 /// (foreign windows need the bridged `WindowStash` path). The Space outlives
 /// the process until logout; keep one per process.
 ///
-/// The absolute level is load-bearing. At `.default` (0) the WindowServer
-/// composites a Space commit's window band OVER this Space: measured on a
-/// Mission Control exit onto another desktop Space, the window kept alpha 1 in
-/// every channel and stayed ordered in, while `occlusionState` lost `.visible`
-/// for ~170ms with the outgoing Space's windows ordered above it — a visible
-/// flicker as the new Space settles. `.setupAssistant` (100) clears that band
-/// and is the lowest named level that does. Do NOT raise it further: the levels
-/// above are the system shields (200 security agent, 300 screen lock, 400 the
-/// lock screen's Notification Center, which `WindowStash` already uses), and a
-/// dock Space at those levels would draw over the lock screen.
+/// The absolute level cannot be picked once and left. Two measured facts pull
+/// in opposite directions:
+///
+/// - At level 0 the WindowServer composites a Space commit's window band OVER
+///   this Space. The window keeps alpha 1 and stays ordered in, but
+///   `occlusionState` loses `.visible` for ~170ms behind the outgoing Space's
+///   windows: the flicker as a new desktop Space settles after Mission Control.
+///   Raising the level clears the band.
+/// - Drag destination routing reaches ONLY Spaces at level 0. Above it the
+///   WindowServer never offers the Space's windows to a drag, so no
+///   `NSDraggingDestination` in them sees `draggingEntered`. Levels 1, 2, 10,
+///   25, 50, 75 and 99 were probed with a synthetic drag: every one of them is
+///   blocked, so there is no compromise level to settle on.
+///
+/// So the level moves. The Space rests at `elevatedLevel` and drops to 0 only
+/// while a drag is actually in flight, detected from the drag pasteboard's
+/// `changeCount`. Routing is re-evaluated per drag event rather than latched at
+/// drag start, so lowering after the drag has begun still routes it (measured),
+/// which is what makes the lazy detection safe.
+///
+/// A press is deliberately NOT enough to lower: clicking a dock icon that
+/// activates an app on another Space commits that Space with the button still
+/// down, so lowering on press reproduced the flicker on every such click.
+/// The residual is a Space commit during a real drag, which keeps the old
+/// flicker and is the rarest case of the three.
+///
+/// Do not raise `elevatedLevel` past 100: 200/300/400 are the system shields
+/// (`WindowStash` uses 400) and a Space there would draw over the lock screen.
 @MainActor
 public final class WindowOverlaySpace {
     public let id: CGSSpaceID
-    private let connection: CGSConnectionID
 
-    public init() throws {
+    /// Level the Space rests at when no drag is in flight. 0 pins the Space at
+    /// the drag-routing level for its lifetime and disables the gate.
+    public let elevatedLevel: Int32
+
+    private let connection: CGSConnectionID
+    private let dragPasteboard = NSPasteboard(name: .drag)
+    private var currentLevel: Int32
+    private var monitors: [Any] = []
+    private var dragPasteboardBaseline = 0
+
+    /// The pending press poll or restore. They are mutually exclusive - a press
+    /// cancels a pending restore, a release ends the poll - so one slot holds
+    /// both, and scheduling either cancels whatever was in flight.
+    private var scheduledCheck: DispatchWorkItem?
+
+    private static let dragRoutingLevel: Int32 = 0
+
+    /// Interval the press check runs at. It exists only between a press and its
+    /// release.
+    private static let pressPollInterval: TimeInterval = 0.06
+
+    /// Delay after release before returning to `elevatedLevel`, so a drop's
+    /// `performDragOperation`/`draggingEnded` still land while routable.
+    ///
+    /// The restore cannot hang off the mouse-up event: AppKit's drag tracking
+    /// loop consumes the release, so neither monitor sees it (measured - the
+    /// Space stayed at 0 forever after one drag). `pressedMouseButtons` is
+    /// polled instead.
+    private static let restoreDelay: TimeInterval = 0.25
+
+    public init(elevatedLevel: Int32 = 100) throws {
         connection = CGSMainConnectionID()
         guard let spaceID = slsCreateSpace(connection) else {
             throw WindowSpaceError.operationUnavailable("SLSSpaceCreate")
         }
-        slsSetSpaceAbsoluteLevel(connection, spaceID, .setupAssistant)
+        self.elevatedLevel = max(0, elevatedLevel)
+        currentLevel = self.elevatedLevel
+        slsSetSpaceAbsoluteLevel(connection, spaceID, currentLevel)
         slsShowSpaces(connection, [spaceID])
-        Logger.info("WindowOverlaySpace: created space \(spaceID) at level 100")
         id = spaceID
+
+        installDragRoutingGate()
+        if NSEvent.pressedMouseButtons != 0 {
+            dragPasteboardBaseline = dragPasteboard.changeCount
+            checkPress()
+        }
+    }
+
+    deinit {
+        let pendingCheck = scheduledCheck
+        let installedMonitors = monitors
+        DispatchQueue.main.async {
+            pendingCheck?.cancel()
+            installedMonitors.forEach(NSEvent.removeMonitor)
+        }
+    }
+
+    /// Watches mouse presses so a drag can be spotted while it is in flight.
+    /// The monitors are press/release only: they add no wake on mouse movement,
+    /// keystrokes or at idle. The global monitor is observe-only by
+    /// construction (its handler returns Void, so it cannot consume an event),
+    /// and the local one returns every event unmodified.
+    ///
+    /// Without the global monitor the gate could never lower the Space, which
+    /// would break every drop into it. Stay at the routing level in that case
+    /// and accept the commit flicker.
+    private func installDragRoutingGate() {
+        guard elevatedLevel != Self.dragRoutingLevel else { return }
+
+        let mask: NSEvent.EventTypeMask = [
+            .leftMouseDown, .rightMouseDown, .otherMouseDown,
+            .leftMouseUp, .rightMouseUp, .otherMouseUp,
+        ]
+
+        guard let globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask, handler: { [weak self] event in
+            MainActor.assumeIsolated { self?.handleMouseEvent(event) }
+        }) else {
+            setLevel(Self.dragRoutingLevel)
+            return
+        }
+        monitors.append(globalMonitor)
+
+        if let localMonitor = NSEvent.addLocalMonitorForEvents(matching: mask, handler: { [weak self] event in
+            MainActor.assumeIsolated { self?.handleMouseEvent(event) }
+            return event
+        }) {
+            monitors.append(localMonitor)
+        }
+    }
+
+    private func handleMouseEvent(_ event: NSEvent) {
+        switch event.type {
+        case .leftMouseDown, .rightMouseDown, .otherMouseDown:
+            dragPasteboardBaseline = dragPasteboard.changeCount
+        default:
+            break
+        }
+        checkPress()
+    }
+
+    /// A press alone is not a drag. Clicking an icon that activates an app on
+    /// another Space commits that Space while the button is still down, so
+    /// lowering on the press put the Space at 0 for exactly that commit and the
+    /// flicker came back. The drag pasteboard's `changeCount` is quiet through a
+    /// plain click and bumps when a drag session starts, system-wide - measured
+    /// from a process that was neither the drag's source nor its destination.
+    private func checkPress() {
+        guard NSEvent.pressedMouseButtons != 0 else {
+            if currentLevel != elevatedLevel {
+                schedule(after: Self.restoreDelay) { $0.restore() }
+            }
+            return
+        }
+
+        if currentLevel != Self.dragRoutingLevel, dragPasteboard.changeCount != dragPasteboardBaseline {
+            setLevel(Self.dragRoutingLevel)
+        }
+        schedule(after: Self.pressPollInterval) { $0.checkPress() }
+    }
+
+    private func restore() {
+        guard NSEvent.pressedMouseButtons == 0 else {
+            checkPress()
+            return
+        }
+        setLevel(elevatedLevel)
+    }
+
+    private func schedule(after delay: TimeInterval, _ body: @escaping (WindowOverlaySpace) -> Void) {
+        scheduledCheck?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            scheduledCheck = nil
+            body(self)
+        }
+        scheduledCheck = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func setLevel(_ level: Int32) {
+        guard level != currentLevel else { return }
+        currentLevel = level
+        slsSetSpaceAbsoluteLevel(connection, id, level)
     }
 
     /// Moves the window into the overlay Space, removing it from every managed
