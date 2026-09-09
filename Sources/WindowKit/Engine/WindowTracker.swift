@@ -15,6 +15,8 @@ public final class WindowTracker {
 
     public var agentWindowEvents: AnyPublisher<AgentWindowsEvent, Never> { floatingAgents.events }
 
+    func isFloatingAgent(_ app: NSRunningApplication) -> Bool { processWatcher.isFloatingAgent(app) }
+
     private lazy var floatingAgents = FloatingAgentWatcher(axQueue: axQueue)
     var headless: Bool = false {
         didSet { discovery.screenshotService.headless = headless }

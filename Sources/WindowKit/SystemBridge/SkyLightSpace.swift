@@ -273,10 +273,16 @@ extension CapturedWindow {
 ///   and leaving Spaces: a foreign on-screen window at the popup-menu level
 ///   intersecting a visible member counts until its last leave. That catches
 ///   context menus from any app, tracked or not, and nothing else. Floating
-///   agents' windows (the Screenshot toolbar and thumbnail) join no Space and
-///   fire nothing there, so their live frames come from
+///   agents' windows (the Screenshot toolbar and thumbnail, the
+///   Picture-in-Picture window) either join no Space or sit at a level the
+///   filter ignores and get moved by the user, so their live frames come from
 ///   `WindowKit.agentWindowEvents` instead. No event exists for foreign
 ///   window moves or z-order changes.
+///
+/// Lowering only restores window-level ordering: at level 0 a member still
+/// draws over any foreign window whose level is below the member's own. The
+/// Picture-in-Picture window sits at the utility level (19), so members that
+/// should yield to it must be ordered below that level themselves.
 ///
 /// Do not raise `elevatedLevel` past 100: 200/300/400 are the system shields
 /// (`WindowStash` uses 400) and a Space there would draw over the lock screen.

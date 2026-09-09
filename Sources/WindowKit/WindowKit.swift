@@ -425,6 +425,7 @@ public final class WindowKit {
                 guard let self else { return }
                 switch event {
                 case .applicationWillLaunch(let app):
+                    guard !self.tracker.isFloatingAgent(app) else { break }
                     let pid = app.processIdentifier
                     guard !self.launchingApplications.contains(where: { $0.processIdentifier == pid }) else { break }
                     self.launchingApplications.append(app)
@@ -433,6 +434,7 @@ public final class WindowKit {
                     self.refreshTrackedApplicationsFromRepository()
 
                 case .applicationLaunched(let app):
+                    guard !self.tracker.isFloatingAgent(app) else { break }
                     let launchedPID = app.processIdentifier
                     if self.launchingApplications.contains(where: { $0.processIdentifier == launchedPID }) {
                         self.scheduleLaunchTimeout(for: launchedPID, after: Self.postLaunchWindowGraceSeconds)
