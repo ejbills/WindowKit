@@ -491,6 +491,7 @@ public final class WindowKit {
                     self.pendingWindowInvalidations.insert(id)
                     self.scheduleBookkeepingFlush()
                 case .windowChanged(let window):
+                    self.pendingTrackedRefresh = true
                     self.pendingPIDInvalidations.insert(window.ownerPID)
                     self.scheduleBookkeepingFlush()
                 case .windowActivityDetected:
@@ -576,17 +577,33 @@ public final class WindowKit {
         }
     }
 
+    /// Publishes the repository's PIDs as `trackedApplications`, reusing
+    /// already-published instances. The PID-list guard latches only when every
+    /// live PID resolved to a `.regular` app; otherwise the next refresh retries.
     private func refreshTrackedApplicationsFromRepository() {
         let currentRepositoryPIDs = tracker.repository.trackedPIDs()
         guard currentRepositoryPIDs != lastTrackedRepositoryPIDs else { return }
-        lastTrackedRepositoryPIDs = currentRepositoryPIDs
 
+        var retained: [pid_t: NSRunningApplication] = [:]
+        for app in trackedApplications { retained[app.processIdentifier] = app }
+        for app in launchingApplications where retained[app.processIdentifier] == nil {
+            retained[app.processIdentifier] = app
+        }
+
+        var unresolvedLivePID = false
         let applications = currentRepositoryPIDs
             .compactMap { pid -> (app: NSRunningApplication, pid: pid_t)? in
-                guard let app = NSRunningApplication(processIdentifier: pid),
-                      app.activationPolicy == .regular else { return nil }
+                guard let app = retained[pid] ?? NSRunningApplication(processIdentifier: pid) else {
+                    if kill(pid, 0) == 0 { unresolvedLivePID = true }
+                    return nil
+                }
+                guard app.activationPolicy == .regular else {
+                    if !app.isTerminated, retained[pid] == nil { unresolvedLivePID = true }
+                    return nil
+                }
                 return (app: app, pid: pid)
             }
+        lastTrackedRepositoryPIDs = unresolvedLivePID ? [] : currentRepositoryPIDs
 
         let pids = applications.map(\.pid)
         let currentPIDs = trackedApplications.map(\.processIdentifier)
