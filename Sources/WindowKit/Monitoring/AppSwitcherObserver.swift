@@ -14,6 +14,7 @@ public struct AppSwitcherSelection: Equatable, Sendable {
     /// AX title of the selected item.
     public let title: String?
     /// The selected item's rect, in AX/Quartz coordinates (top-left origin, flipped vs AppKit).
+    /// Never empty: a selection whose geometry can't be read is not published.
     public let frame: CGRect
 }
 
@@ -413,11 +414,12 @@ final class AppSwitcherObserver: @unchecked Sendable {
         guard let selected = try? list.attribute(kAXSelectedChildrenAttribute, as: [AXUIElement].self),
               let item = selected.first else { return nil }
 
+        guard let position = try? item.position(),
+              let size = try? item.size(),
+              size.width > 0, size.height > 0 else { return nil }
+
         let title = try? item.title()
         let (pid, bundleID) = resolveApp(for: item, title: title)
-
-        let position = (try? item.position()) ?? .zero
-        let size = (try? item.size()) ?? .zero
 
         return AppSwitcherSelection(
             ownerPID: pid,
