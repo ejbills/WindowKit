@@ -50,6 +50,7 @@ public final class WindowTracker {
     private let destroyBurstState = OSAllocatedUnfairLock(initialState: [pid_t: DestroyBurstState]())
     private let axQueue = DispatchQueue(label: "com.windowkit.ax", qos: .userInitiated)
     private var notificationCenterWatcher: AccessibilityWatcher?
+    private let notificationCenterWatcherQueue = DispatchQueue(label: "com.windowkit.notificationcenter-watcher", qos: .utility)
     private var isTracking = false
     private var wakeObserver: NSObjectProtocol?
     private var wakeCooldownUntil: ContinuousClock.Instant?
@@ -148,11 +149,18 @@ public final class WindowTracker {
         if !excludedBundleIDs.isEmpty {
             repository.excludedPIDs = resolveExcludedPIDs(in: apps)
         }
+        var pidsToWatch = [pid_t]()
         for app in apps {
             let pid = app.processIdentifier
             repository.registerPID(pid)
             guard !repository.isExcludedOrIgnored(pid) else { continue }
-            manager.watch(pid: pid)
+            pidsToWatch.append(pid)
+        }
+        axQueue.async { [weak self] in
+            for pid in pidsToWatch {
+                guard let self, self.isTracking else { return }
+                self.ensureWatching(pid: pid, reason: "startup")
+            }
         }
 
         startNotificationCenterWatcher()
@@ -1211,16 +1219,37 @@ public final class WindowTracker {
 
     // MARK: - Notification Center Banner Watcher
 
+    /// Observer registration is a synchronous AX round-trip per notification, and
+    /// an unresponsive NotificationCenter answers each only at the messaging
+    /// timeout, so the watcher is built on its own queue and adopted on the main
+    /// thread once it exists.
     private func startNotificationCenterWatcher() {
         guard let ncApp = NSWorkspace.shared.runningApplications
-            .first(where: { $0.bundleIdentifier == "com.apple.notificationcenterui" }),
-              let watcher = AccessibilityWatcher(pid: ncApp.processIdentifier) else {
-            Logger.debug("NotificationCenter UI not found or not watchable")
+            .first(where: { $0.bundleIdentifier == "com.apple.notificationcenterui" }) else {
+            Logger.debug("NotificationCenter UI not found")
             return
         }
+        let pid = ncApp.processIdentifier
 
+        notificationCenterWatcherQueue.async { [weak self] in
+            guard let self, self.isTracking else { return }
+            guard let watcher = AccessibilityWatcher(pid: pid) else {
+                Logger.debug("NotificationCenter UI not watchable", details: "pid=\(pid)")
+                return
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.isTracking, self.notificationCenterWatcher == nil else {
+                    watcher.stopWatching()
+                    return
+                }
+                self.adoptNotificationCenterWatcher(watcher, pid: pid)
+            }
+        }
+    }
+
+    private func adoptNotificationCenterWatcher(_ watcher: AccessibilityWatcher, pid: pid_t) {
         notificationCenterWatcher = watcher
-        Logger.debug("Watching NotificationCenter UI", details: "pid=\(ncApp.processIdentifier)")
+        Logger.debug("Watching NotificationCenter UI", details: "pid=\(pid)")
 
         watcher.events
             .sink { [weak self] event in
