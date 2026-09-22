@@ -300,7 +300,14 @@ public final class WindowTracker {
             repository.purify(
                 forPID: pid,
                 preservingWindowIDs: discoveryResult.externallyVisibleWindowIDs,
-                validator: { enumerator.isValidElement($0) }
+                validator: { window in
+                    enumerator.isValidElement(window.axElement) &&
+                        !enumerator.isOrderedOutWindow(
+                            windowID: window.id,
+                            element: window.axElement,
+                            isOwnerHidden: window.isOwnerHidden
+                        )
+                }
             )
             let afterIDs = Set(repository.readCache(forPID: pid).map(\.id))
             for staleID in beforeIDs.subtracting(afterIDs) {

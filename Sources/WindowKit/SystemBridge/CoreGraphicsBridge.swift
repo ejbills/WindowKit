@@ -150,6 +150,8 @@ private var registerConnectionNotifyPtr: SLSRegisterConnectionNotifyProcType?
 private var removeConnectionNotifyPtr: SLSRemoveConnectionNotifyProcType?
 private typealias SLSCopyWindowsWithOptionsAndTagsType = @convention(c) (CGSConnectionID, UInt32, CFArray, UInt32, UnsafeMutablePointer<UInt64>, UnsafeMutablePointer<UInt64>) -> Unmanaged<CFArray>?
 private var copyWindowsWithOptionsAndTagsPtr: SLSCopyWindowsWithOptionsAndTagsType?
+private typealias SLSWindowIsOrderedInType = @convention(c) (CGSConnectionID, CGWindowID, UnsafeMutablePointer<Bool>) -> CGError
+private var windowIsOrderedInPtr: SLSWindowIsOrderedInType?
 
 private func loadSkyLightFunctions() {
     guard skyLightHandle == nil else { return }
@@ -200,6 +202,10 @@ private func loadSkyLightFunctions() {
     if let symbol = dlsym(handle, "SLSRemoveConnectionNotifyProc") {
         removeConnectionNotifyPtr = unsafeBitCast(symbol, to: SLSRemoveConnectionNotifyProcType.self)
     }
+
+    if let symbol = dlsym(handle, "SLSWindowIsOrderedIn") {
+        windowIsOrderedInPtr = unsafeBitCast(symbol, to: SLSWindowIsOrderedInType.self)
+    }
 }
 
 func _SLPSSetFrontProcessWithOptions(
@@ -244,6 +250,17 @@ public func cgsHardwareCaptureWindows(
         )
         return cfArray as? [CGImage]
     }
+}
+
+/// Whether WindowServer has the window ordered in, which is independent of the Space it is on:
+/// a window on another Space is ordered in, a window its app created but never showed is not.
+/// Returns nil when the call is unavailable or fails, so callers can fall back.
+public func cgsWindowIsOrderedIn(_ connection: CGSConnectionID, _ windowID: CGWindowID) -> Bool? {
+    loadSkyLightFunctions()
+    guard let windowIsOrderedInPtr else { return nil }
+    var isOrderedIn = false
+    guard windowIsOrderedInPtr(connection, windowID, &isOrderedIn) == .success else { return nil }
+    return isOrderedIn
 }
 
 public func cgsWindowSpaces(_ connection: CGSConnectionID, _ windowID: CGWindowID) -> [Int] {

@@ -193,6 +193,16 @@ public struct WindowEnumerator {
         // windows until their app was next focused (cold-start discovery loss on
         // multi-Space setups). A live AX window is a real window; only
         // heuristic-matched entries stay subject to the space checks below.
+        //
+        // Ordering is the one signal that separates the two: a window on another
+        // Space is ordered in, while a window its app created and never showed
+        // (Termius' unopened Settings window, Teams' spare window) is not. Space
+        // membership stays a second condition so a stale-but-shown window is kept.
+        if windowSpaces.isEmpty, cgsWindowIsOrderedIn(cgsMainConnection(), windowID) == false {
+            Logger.debug("Rejecting never-shown window", details: "id=\(windowID), app=\(app.localizedName ?? "?")")
+            return false
+        }
+
         if hasAuthoritativeWindowID {
             return true
         }
@@ -208,6 +218,19 @@ public struct WindowEnumerator {
 
         Logger.debug("Window rejected by acceptance criteria", details: "id=\(windowID), onScreen=\(isOnScreen), spaces=\(windowSpaces)")
         return false
+    }
+
+    /// Whether a cached window has since been ordered out by its app, which nothing else removes:
+    /// the AX element stays valid for as long as the app lives, so a window accepted once during
+    /// launch (Termius' unopened Settings window) would otherwise sit in the cache forever.
+    public func isOrderedOutWindow(windowID: CGWindowID, element: AXUIElement, isOwnerHidden: Bool) -> Bool {
+        guard !isOwnerHidden else { return false }
+        guard Set(windowID.spaces()).isEmpty else { return false }
+        guard cgsWindowIsOrderedIn(cgsMainConnection(), windowID) == false else { return false }
+
+        let isMinimized = (try? element.isMinimized()) ?? false
+        let isFullscreen = (try? element.isFullscreen()) ?? false
+        return !isMinimized && !isFullscreen
     }
 
     public func isValidElement(_ element: AXUIElement, isMinimized: Bool = false, isHidden: Bool = false) -> Bool {

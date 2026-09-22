@@ -318,7 +318,7 @@ public final class WindowRepository: @unchecked Sendable {
     public func purify(
         forPID pid: pid_t,
         preservingWindowIDs preservedWindowIDs: Set<CGWindowID> = [],
-        validator: (AXUIElement) -> Bool
+        validator: (CapturedWindow) -> Bool
     ) -> Set<CapturedWindow> {
         cacheLock.lock()
         let snapshot = entries[pid] ?? []
@@ -333,7 +333,7 @@ public final class WindowRepository: @unchecked Sendable {
             if preservedWindowIDs.contains(window.id) {
                 continue
             }
-            if !validator(window.axElement) {
+            if !validator(window) {
                 invalidElements[window.id] = window.axElement
             }
         }
