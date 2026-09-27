@@ -142,6 +142,7 @@ public final class WindowTracker {
             .store(in: &subscriptions)
 
         processWatcher.floatingAgentBundleIDs = FloatingAgentWatcher.bundleIDs
+        processWatcher.isTrackedPID = { [repository] pid in repository.trackedPIDs().contains(pid) }
         processWatcher.runningFloatingAgents().forEach(floatingAgents.watch)
 
         let apps = processWatcher.runningApplications()
@@ -253,6 +254,10 @@ public final class WindowTracker {
     @discardableResult
     public func trackApplication(_ app: NSRunningApplication) async -> [CapturedWindow] {
         let pid = app.processIdentifier
+        guard !app.isTerminated else {
+            Logger.debug("Skipping track of terminated app", details: "pid=\(pid)")
+            return []
+        }
         if repository.ignoredPIDs.contains(pid) { return [] }
         if repository.excludedPIDs.contains(pid) {
             repository.registerPID(pid)
@@ -606,6 +611,7 @@ public final class WindowTracker {
             destroyBurstState.withLockUnchecked { _ = $0.removeValue(forKey: pid) }
             let windows = repository.readCache(forPID: pid)
             repository.removeAll(forPID: pid)
+            Logger.debug("Application terminated", details: "pid=\(pid), cachedWindows=\(windows.count)")
             for window in windows {
                 eventSubject.send(.windowDisappeared(window.id))
             }

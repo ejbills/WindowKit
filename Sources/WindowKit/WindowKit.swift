@@ -597,6 +597,10 @@ public final class WindowKit {
                     if kill(pid, 0) == 0 { unresolvedLivePID = true }
                     return nil
                 }
+                guard !app.isTerminated else {
+                    Logger.warning("Dropped terminated app from tracked applications", details: "pid=\(pid), bundleID=\(app.bundleIdentifier ?? "-")")
+                    return nil
+                }
                 guard app.activationPolicy == .regular else {
                     if !app.isTerminated, retained[pid] == nil { unresolvedLivePID = true }
                     return nil

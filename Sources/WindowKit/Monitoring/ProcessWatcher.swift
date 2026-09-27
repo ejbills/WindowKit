@@ -75,6 +75,10 @@ public final class ProcessWatcher {
     /// regular apps (see `FloatingAgentWatcher`).
     var floatingAgentBundleIDs: Set<String> = []
 
+    /// Whether a PID is tracked, so its exit is reported even when it was never marked
+    /// launched (it turned `.regular` after its policy-flip window expired).
+    var isTrackedPID: ((pid_t) -> Bool)?
+
     func runningFloatingAgents() -> [NSRunningApplication] {
         NSWorkspace.shared.runningApplications.filter(isFloatingAgent)
     }
@@ -113,10 +117,15 @@ public final class ProcessWatcher {
             }
         }
 
-        for identity in pidsByIdentity.keys where !currentIdentities.contains(identity) {
+        var departedPIDs = knownPIDs.subtracting(currentPIDs)
+        for (identity, entry) in pidsByIdentity where !currentIdentities.contains(identity) {
             pidsByIdentity.removeValue(forKey: identity)
+            if !currentPIDs.contains(entry.pid), !knownPIDs.contains(entry.pid), isTrackedPID?(entry.pid) == true {
+                Logger.info("Exit of app never seen launching", details: "pid=\(entry.pid), bundleID=\(entry.app.bundleIdentifier ?? "-")")
+                departedPIDs.insert(entry.pid)
+            }
         }
-        for pid in knownPIDs.subtracting(currentPIDs) {
+        for pid in departedPIDs {
             knownPIDs.remove(pid)
             eventSubject.send(.applicationTerminated(pid))
         }
