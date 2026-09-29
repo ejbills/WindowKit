@@ -21,6 +21,8 @@ public final class ProcessWatcher {
     private var pidsByIdentity: [ObjectIdentifier: (app: NSRunningApplication, pid: pid_t)] = [:]
     private let retirementQueue = DispatchQueue(label: "com.windowkit.process-observation-retirement", qos: .utility)
     private let activationQueue = DispatchQueue(label: "com.windowkit.activation-policy", qos: .userInitiated)
+    private var deliveredPIDs: [ObjectIdentifier: (app: NSRunningApplication, pid: pid_t)] = [:]
+    private var deliveredOrder: [ObjectIdentifier] = []
 
     private struct PolicyObservation {
         let app: NSRunningApplication
@@ -87,10 +89,28 @@ public final class ProcessWatcher {
     ) {
         activationQueue.async { [weak self] in
             guard app.activationPolicy == .regular else { return }
+            let pid = app.processIdentifier
             DispatchQueue.main.async {
                 guard let self else { return }
+                self.rememberDelivered(app, pid: pid)
                 deliver(self, app)
             }
+        }
+    }
+
+    /// The pid read with the activation policy for an app delivered in an activation event.
+    func deliveredProcessIdentifier(of app: NSRunningApplication) -> pid_t? {
+        deliveredPIDs[ObjectIdentifier(app)]?.pid
+    }
+
+    /// Keeps the most recently delivered instances (retained, so identifiers stay unique).
+    private func rememberDelivered(_ app: NSRunningApplication, pid: pid_t) {
+        let identity = ObjectIdentifier(app)
+        if deliveredPIDs.updateValue((app, pid), forKey: identity) == nil {
+            deliveredOrder.append(identity)
+        }
+        while deliveredOrder.count > 8 {
+            deliveredPIDs.removeValue(forKey: deliveredOrder.removeFirst())
         }
     }
 

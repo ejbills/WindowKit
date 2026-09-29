@@ -401,6 +401,7 @@ public final class WindowKit {
     @ObservationIgnored private var appStates: [pid_t: AppWindowState] = [:]
     /// PIDs parallel to `trackedApplications`; reading `processIdentifier` on an exiting app is a synchronous LaunchServices fetch.
     @ObservationIgnored private var trackedApplicationPIDs: [pid_t] = []
+    @ObservationIgnored private var trackedPIDsByInstance: [ObjectIdentifier: pid_t] = [:]
     @ObservationIgnored private var pendingResolutionPIDs: [pid_t]?
     @ObservationIgnored private var resolutionGeneration: UInt64 = 0
     private let resolutionQueue = DispatchQueue(label: "com.windowkit.tracked-app-resolution", qos: .userInitiated)
@@ -463,12 +464,12 @@ public final class WindowKit {
 
                 case .applicationActivated:
                     self.frontmostApplication = self.tracker.frontmostApplication
-                    if let pid = self.frontmostApplication?.processIdentifier {
+                    if let pid = self.frontmostApplication.flatMap(self.processIdentifier(of:)) {
                         self.refreshBadge(forPID: pid)
                     }
 
                 case .applicationDeactivated(let app):
-                    let pid = app.processIdentifier
+                    guard let pid = self.processIdentifier(of: app) else { break }
                     self.refreshBadge(forPID: pid)
                     self.appStates[pid]?.invalidate()
 
@@ -587,7 +588,9 @@ public final class WindowKit {
     /// live PID resolved to a `.regular` app; otherwise the next refresh retries.
     /// Resolution runs on `resolutionQueue` because every `NSRunningApplication`
     /// state read is a synchronous LaunchServices fetch that stalls while an app exits;
-    /// a result superseded by a newer refresh or a removal is dropped.
+    /// a result superseded by a newer refresh or a removal is dropped. Published
+    /// instances are only liveness-checked by pid: a background fetch holds the
+    /// instance's lock, which main-thread readers of the same instance then wait on.
     private func refreshTrackedApplicationsFromRepository() {
         let currentRepositoryPIDs = tracker.repository.trackedPIDs()
         guard currentRepositoryPIDs != lastTrackedRepositoryPIDs,
@@ -609,6 +612,13 @@ public final class WindowKit {
             var unresolvedLivePID = false
             let applications = currentRepositoryPIDs
                 .compactMap { pid -> (app: NSRunningApplication, pid: pid_t)? in
+                    if let published = trackedByPID[pid] {
+                        guard kill(pid, 0) == 0 || errno != ESRCH else {
+                            Logger.warning("Dropped exited app from tracked applications", details: "pid=\(pid)")
+                            return nil
+                        }
+                        return (app: published, pid: pid)
+                    }
                     guard let app = retained[pid] ?? NSRunningApplication(processIdentifier: pid) else {
                         if kill(pid, 0) == 0 { unresolvedLivePID = true }
                         return nil
@@ -637,6 +647,10 @@ public final class WindowKit {
                 guard pids != self.trackedApplicationPIDs else { return }
                 self.trackedApplications = applications.map(\.app)
                 self.trackedApplicationPIDs = pids
+                self.trackedPIDsByInstance = Dictionary(
+                    applications.map { (ObjectIdentifier($0.app), $0.pid) },
+                    uniquingKeysWith: { first, _ in first }
+                )
             }
         }
     }
@@ -646,8 +660,16 @@ public final class WindowKit {
         pendingResolutionPIDs = nil
         resolutionGeneration &+= 1
         guard let index = trackedApplicationPIDs.firstIndex(of: pid) else { return }
+        trackedPIDsByInstance.removeValue(forKey: ObjectIdentifier(trackedApplications[index]))
         trackedApplications.remove(at: index)
         trackedApplicationPIDs.remove(at: index)
+    }
+
+    /// The pid WindowKit resolved for `app`, matched by instance: a tracked application or one
+    /// delivered in a recent activation event; nil otherwise. Reading `processIdentifier` instead
+    /// is a synchronous LaunchServices fetch that stalls while any app exits.
+    public func processIdentifier(of app: NSRunningApplication) -> pid_t? {
+        trackedPIDsByInstance[ObjectIdentifier(app)] ?? tracker.deliveredProcessIdentifier(of: app)
     }
 
     private func scheduleLaunchTimeout(for pid: pid_t, after seconds: TimeInterval = WindowKit.launchTimeoutSeconds) {
@@ -1002,7 +1024,7 @@ public final class WindowKit {
     }
 
     public func windowState(for application: NSRunningApplication) -> AppWindowState {
-        windowState(for: application.processIdentifier)
+        windowState(for: processIdentifier(of: application) ?? application.processIdentifier)
     }
 
     public func badgeState(forBundleIdentifier bundleIdentifier: String) -> AppBadgeState {

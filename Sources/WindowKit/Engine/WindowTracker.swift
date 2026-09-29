@@ -40,6 +40,7 @@ public final class WindowTracker {
 
     public var processEvents: AnyPublisher<ProcessEvent, Never> { processWatcher.events }
     public var frontmostApplication: NSRunningApplication? { processWatcher.frontmostApplication }
+    func deliveredProcessIdentifier(of app: NSRunningApplication) -> pid_t? { processWatcher.deliveredProcessIdentifier(of: app) }
 
     private let debouncedTasks = OSAllocatedUnfairLock(initialState: [String: (task: Task<Void, Never>, generation: UInt64)]())
     private let debounceGeneration = OSAllocatedUnfairLock(initialState: UInt64(0))
