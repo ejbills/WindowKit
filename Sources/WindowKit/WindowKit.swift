@@ -1068,12 +1068,12 @@ public final class WindowKit {
 
     private func refreshBadge(forPID pid: pid_t) {
         guard badgeTrackingEnabled else { return }
-        let app = NSRunningApplication(processIdentifier: pid)
-        let bundleIdentifier = app?.bundleIdentifier
-        let bundlePath = app?.bundleURL?.standardizedFileURL.path
         badgeQueue.async { [badgeStore, weak self] in
             let changed = badgeStore.refresh(forPID: pid)
             if changed {
+                let app = NSRunningApplication(processIdentifier: pid)
+                let bundleIdentifier = app?.bundleIdentifier
+                let bundlePath = app?.bundleURL?.standardizedFileURL.path
                 Logger.debug("Badge changed", details: "pid=\(pid)")
                 Task { @MainActor [weak self] in
                     guard let self, self.badgeTrackingEnabled else { return }
