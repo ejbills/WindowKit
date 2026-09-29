@@ -215,6 +215,7 @@ public final class WindowRepository: @unchecked Sendable {
         return changes
     }
 
+    /// Runs `mutation` under the cache lock the main thread reads through; it must make no AX, LaunchServices or SkyLight calls (validate first, as `purify` does).
     @discardableResult
     public func modify(forPID pid: pid_t, _ mutation: (inout Set<CapturedWindow>) -> Void) -> ChangeReport {
         cacheLock.lock()
@@ -227,6 +228,7 @@ public final class WindowRepository: @unchecked Sendable {
         return computeChanges(old: oldWindows, new: currentWindows)
     }
 
+    /// Runs `update` under the cache lock; the same no-cross-process-calls rule as `modify` applies.
     public func updateCache(forPID pid: pid_t, update: (inout Set<CapturedWindow>) -> Void) {
         cacheLock.lock()
         defer { cacheLock.unlock() }

@@ -1066,16 +1066,15 @@ public final class WindowTracker {
                     eventSubject.send(.windowDisappeared(window.id))
                 }
             } else {
-                let changes = repository.modify(forPID: pid) { windows in
-                    let before = windows
-                    windows = windows.filter {
-                        self.enumerator.isValidElement($0.axElement, isMinimized: $0.isMinimized, isHidden: $0.isOwnerHidden)
-                    }
-                    let removedCount = before.count - windows.count
-                    if removedCount > 0 {
-                        Logger.debug("Filtered invalid windows", details: "pid=\(pid), removed=\(removedCount)")
-                    }
+                var invalidElements: [CGWindowID: AXUIElement] = [:]
+                for window in cached where !enumerator.isValidElement(window.axElement, isMinimized: window.isMinimized, isHidden: window.isOwnerHidden) {
+                    invalidElements[window.id] = window.axElement
                 }
+                guard !invalidElements.isEmpty else { return }
+                let changes = repository.modify(forPID: pid) { windows in
+                    windows = windows.filter { invalidElements[$0.id] != $0.axElement }
+                }
+                Logger.debug("Filtered invalid windows", details: "pid=\(pid), removed=\(changes.removed.count)")
                 emitChanges(changes)
             }
         }

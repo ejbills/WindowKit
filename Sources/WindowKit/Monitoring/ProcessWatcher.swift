@@ -19,13 +19,15 @@ public final class ProcessWatcher {
     private var pendingPolicyObservations: [pid_t: PolicyObservation] = [:]
     private var pendingFinishObservations: [pid_t: PolicyObservation] = [:]
     private var pidsByIdentity: [ObjectIdentifier: (app: NSRunningApplication, pid: pid_t)] = [:]
+    private let observationQueue = DispatchQueue(label: "com.windowkit.process-observations", qos: .utility)
 
-    private struct PolicyObservation {
+    /// Retains the observed app for the token's lifetime; `token` is only touched on `observationQueue`.
+    private final class PolicyObservation {
         let app: NSRunningApplication
-        let token: NSKeyValueObservation
+        var token: NSKeyValueObservation?
 
-        func invalidate() {
-            token.invalidate()
+        init(app: NSRunningApplication) {
+            self.app = app
         }
     }
 
@@ -60,11 +62,33 @@ public final class ProcessWatcher {
         observations.removeAll()
         runningAppsObservation?.invalidate()
         runningAppsObservation = nil
-        pendingPolicyObservations.values.forEach { $0.invalidate() }
+        retire(Array(pendingPolicyObservations.values) + Array(pendingFinishObservations.values))
         pendingPolicyObservations.removeAll()
-        pendingFinishObservations.values.forEach { $0.invalidate() }
         pendingFinishObservations.removeAll()
         pidsByIdentity.removeAll()
+    }
+
+    /// Registers the observation on `observationQueue`; adding or removing KVO on an app is a synchronous LaunchServices round-trip.
+    private func startObservation(
+        of app: NSRunningApplication,
+        _ register: @escaping (NSRunningApplication) -> NSKeyValueObservation
+    ) -> PolicyObservation {
+        let observation = PolicyObservation(app: app)
+        observationQueue.async {
+            observation.token = register(app)
+        }
+        return observation
+    }
+
+    /// Invalidates observations on `observationQueue`, after their registration.
+    private func retire(_ observations: [PolicyObservation]) {
+        guard !observations.isEmpty else { return }
+        observationQueue.async {
+            for observation in observations {
+                observation.token?.invalidate()
+                observation.token = nil
+            }
+        }
     }
 
     public func runningApplications() -> [NSRunningApplication] {
@@ -129,19 +153,27 @@ public final class ProcessWatcher {
             knownPIDs.remove(pid)
             eventSubject.send(.applicationTerminated(pid))
         }
+        var departedObservations: [PolicyObservation] = []
         for pid in Set(pendingPolicyObservations.keys).subtracting(currentPIDs) {
-            pendingPolicyObservations.removeValue(forKey: pid)?.invalidate()
+            if let observation = pendingPolicyObservations.removeValue(forKey: pid) {
+                departedObservations.append(observation)
+            }
         }
         for pid in Set(pendingFinishObservations.keys).subtracting(currentPIDs) {
-            pendingFinishObservations.removeValue(forKey: pid)?.invalidate()
+            if let observation = pendingFinishObservations.removeValue(forKey: pid) {
+                departedObservations.append(observation)
+            }
         }
+        retire(departedObservations)
     }
 
     /// `.applicationWillLaunch` at membership insertion, `.applicationLaunched`
     /// when `isFinishedLaunching` flips.
     private func markLaunched(_ app: NSRunningApplication) {
         let pid = app.processIdentifier
-        pendingPolicyObservations.removeValue(forKey: pid)?.invalidate()
+        if let policyObservation = pendingPolicyObservations.removeValue(forKey: pid) {
+            retire([policyObservation])
+        }
         guard !knownPIDs.contains(pid) else { return }
         knownPIDs.insert(pid)
 
@@ -151,18 +183,19 @@ public final class ProcessWatcher {
         }
 
         eventSubject.send(.applicationWillLaunch(app))
-        let token = app.observe(\.isFinishedLaunching) { [weak self] app, _ in
-            DispatchQueue.main.async {
-                guard let self, app.isFinishedLaunching, !app.isTerminated else { return }
-                guard let pending = self.pendingFinishObservations.removeValue(forKey: pid) else { return }
-                pending.invalidate()
-                self.eventSubject.send(.applicationLaunched(app))
+        pendingFinishObservations[pid] = startObservation(of: app) { [weak self] app in
+            app.observe(\.isFinishedLaunching, options: [.initial]) { [weak self] app, _ in
+                DispatchQueue.main.async {
+                    guard let self, app.isFinishedLaunching, !app.isTerminated else { return }
+                    guard let pending = self.pendingFinishObservations.removeValue(forKey: pid) else { return }
+                    self.retire([pending])
+                    self.eventSubject.send(.applicationLaunched(app))
+                }
             }
         }
-        pendingFinishObservations[pid] = PolicyObservation(app: app, token: token)
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.launchFinishTimeout) { [weak self] in
             guard let self, let pending = self.pendingFinishObservations.removeValue(forKey: pid) else { return }
-            pending.invalidate()
+            self.retire([pending])
             if !pending.app.isTerminated {
                 self.eventSubject.send(.applicationLaunched(pending.app))
             }
@@ -171,15 +204,17 @@ public final class ProcessWatcher {
 
     private func observePolicyFlip(of app: NSRunningApplication) {
         let pid = app.processIdentifier
-        let token = app.observe(\.activationPolicy) { [weak self] app, _ in
-            DispatchQueue.main.async {
-                guard let self, app.activationPolicy == .regular, !app.isTerminated else { return }
-                self.markLaunched(app)
+        pendingPolicyObservations[pid] = startObservation(of: app) { [weak self] app in
+            app.observe(\.activationPolicy, options: [.initial]) { [weak self] app, _ in
+                DispatchQueue.main.async {
+                    guard let self, app.activationPolicy == .regular, !app.isTerminated else { return }
+                    self.markLaunched(app)
+                }
             }
         }
-        pendingPolicyObservations[pid] = PolicyObservation(app: app, token: token)
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.policyFlipTimeout) { [weak self] in
-            self?.pendingPolicyObservations.removeValue(forKey: pid)?.invalidate()
+            guard let self, let pending = self.pendingPolicyObservations.removeValue(forKey: pid) else { return }
+            self.retire([pending])
         }
     }
 

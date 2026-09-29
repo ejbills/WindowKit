@@ -399,6 +399,11 @@ public final class WindowKit {
     private let badgeStore = DockBadgeStore()
     private var cancellables = Set<AnyCancellable>()
     @ObservationIgnored private var appStates: [pid_t: AppWindowState] = [:]
+    /// PIDs parallel to `trackedApplications`; reading `processIdentifier` on an exiting app is a synchronous LaunchServices fetch.
+    @ObservationIgnored private var trackedApplicationPIDs: [pid_t] = []
+    @ObservationIgnored private var pendingResolutionPIDs: [pid_t]?
+    @ObservationIgnored private var resolutionGeneration: UInt64 = 0
+    private let resolutionQueue = DispatchQueue(label: "com.windowkit.tracked-app-resolution", qos: .userInitiated)
     @ObservationIgnored private var badgeStates: [AppBadgeLookup: AppBadgeState] = [:]
     private var badgePollTimer: Timer?
     private let badgeQueue = DispatchQueue(label: "com.windowkit.badge", qos: .userInitiated)
@@ -580,46 +585,69 @@ public final class WindowKit {
     /// Publishes the repository's PIDs as `trackedApplications`, reusing
     /// already-published instances. The PID-list guard latches only when every
     /// live PID resolved to a `.regular` app; otherwise the next refresh retries.
+    /// Resolution runs on `resolutionQueue` because every `NSRunningApplication`
+    /// state read is a synchronous LaunchServices fetch that stalls while an app exits;
+    /// a result superseded by a newer refresh or a removal is dropped.
     private func refreshTrackedApplicationsFromRepository() {
         let currentRepositoryPIDs = tracker.repository.trackedPIDs()
-        guard currentRepositoryPIDs != lastTrackedRepositoryPIDs else { return }
+        guard currentRepositoryPIDs != lastTrackedRepositoryPIDs,
+              currentRepositoryPIDs != pendingResolutionPIDs else { return }
+        pendingResolutionPIDs = currentRepositoryPIDs
+        resolutionGeneration &+= 1
+        let generation = resolutionGeneration
 
-        var retained: [pid_t: NSRunningApplication] = [:]
-        for app in trackedApplications { retained[app.processIdentifier] = app }
-        for app in launchingApplications where retained[app.processIdentifier] == nil {
-            retained[app.processIdentifier] = app
-        }
+        var trackedByPID: [pid_t: NSRunningApplication] = [:]
+        for (app, pid) in zip(trackedApplications, trackedApplicationPIDs) { trackedByPID[pid] = app }
+        let launching = launchingApplications
 
-        var unresolvedLivePID = false
-        let applications = currentRepositoryPIDs
-            .compactMap { pid -> (app: NSRunningApplication, pid: pid_t)? in
-                guard let app = retained[pid] ?? NSRunningApplication(processIdentifier: pid) else {
-                    if kill(pid, 0) == 0 { unresolvedLivePID = true }
-                    return nil
-                }
-                guard !app.isTerminated else {
-                    Logger.warning("Dropped terminated app from tracked applications", details: "pid=\(pid), bundleID=\(app.bundleIdentifier ?? "-")")
-                    return nil
-                }
-                guard app.activationPolicy == .regular else {
-                    if !app.isTerminated, retained[pid] == nil { unresolvedLivePID = true }
-                    return nil
-                }
-                return (app: app, pid: pid)
+        resolutionQueue.async { [weak self] in
+            var retained = trackedByPID
+            for app in launching where retained[app.processIdentifier] == nil {
+                retained[app.processIdentifier] = app
             }
-        lastTrackedRepositoryPIDs = unresolvedLivePID ? [] : currentRepositoryPIDs
 
-        let pids = applications.map(\.pid)
-        let currentPIDs = trackedApplications.map(\.processIdentifier)
-        guard pids != currentPIDs else { return }
+            var unresolvedLivePID = false
+            let applications = currentRepositoryPIDs
+                .compactMap { pid -> (app: NSRunningApplication, pid: pid_t)? in
+                    guard let app = retained[pid] ?? NSRunningApplication(processIdentifier: pid) else {
+                        if kill(pid, 0) == 0 { unresolvedLivePID = true }
+                        return nil
+                    }
+                    guard !app.isTerminated else {
+                        Logger.warning("Dropped terminated app from tracked applications", details: "pid=\(pid), bundleID=\(app.bundleIdentifier ?? "-")")
+                        return nil
+                    }
+                    guard app.activationPolicy == .regular else {
+                        if !app.isTerminated, retained[pid] == nil { unresolvedLivePID = true }
+                        return nil
+                    }
+                    return (app: app, pid: pid)
+                }
 
-        trackedApplications = applications.map(\.app)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                guard generation == self.resolutionGeneration else {
+                    if self.pendingResolutionPIDs == nil { self.refreshTrackedApplicationsFromRepository() }
+                    return
+                }
+                self.pendingResolutionPIDs = nil
+                self.lastTrackedRepositoryPIDs = unresolvedLivePID ? [] : currentRepositoryPIDs
+
+                let pids = applications.map(\.pid)
+                guard pids != self.trackedApplicationPIDs else { return }
+                self.trackedApplications = applications.map(\.app)
+                self.trackedApplicationPIDs = pids
+            }
+        }
     }
 
     private func removeTrackedApplication(pid: pid_t) {
         lastTrackedRepositoryPIDs = []
-        guard trackedApplications.contains(where: { $0.processIdentifier == pid }) else { return }
-        trackedApplications.removeAll { $0.processIdentifier == pid }
+        pendingResolutionPIDs = nil
+        resolutionGeneration &+= 1
+        guard let index = trackedApplicationPIDs.firstIndex(of: pid) else { return }
+        trackedApplications.remove(at: index)
+        trackedApplicationPIDs.remove(at: index)
     }
 
     private func scheduleLaunchTimeout(for pid: pid_t, after seconds: TimeInterval = WindowKit.launchTimeoutSeconds) {
@@ -793,8 +821,7 @@ public final class WindowKit {
     private func purgeTerminatedApp(pid: pid_t) {
         cancelLaunchTimeout(for: pid)
         launchingApplications.removeAll { $0.processIdentifier == pid }
-        trackedApplications.removeAll { $0.processIdentifier == pid }
-        lastTrackedRepositoryPIDs = []
+        removeTrackedApplication(pid: pid)
         badgeStore.removeBadge(forPID: pid)
         badgeStore.invalidateCache()
         appStates[pid]?.invalidateBadge()
@@ -939,7 +966,7 @@ public final class WindowKit {
         shouldResumeBadgePollingAfterWake = false
 
         // Rebuild cache before resuming so first poll doesn't report spurious changes.
-        let pids = trackedApplications.map(\.processIdentifier)
+        let pids = trackedApplicationPIDs
         let badgeLookups = Array(badgeStates.keys)
         let bundleIdentifiers = badgeLookups.compactMap(\.bundleIdentifier)
         let bundleURLs = badgeLookups.compactMap(\.bundleURL)
@@ -1100,7 +1127,7 @@ public final class WindowKit {
         }
         badgeRefreshInFlight = true
 
-        var allPIDs = trackedApplications.map(\.processIdentifier)
+        var allPIDs = trackedApplicationPIDs
         for pid in appStates.keys where !allPIDs.contains(pid) {
             allPIDs.append(pid)
         }
