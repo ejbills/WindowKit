@@ -243,6 +243,18 @@ WindowKit.shared.processSwitcherEvents
 
 Requires Accessibility permission and is started/stopped alongside `beginTracking()` / `endTracking()`.
 
+### Minimize Transitions
+
+WindowKit can tell a host when a window starts minimizing, early enough to draw its own animation. The native Dock adds an `AXMinimizedWindowDockItem` to its accessibility tree ~30ms before the minimize animation is visible; the owner app's own miniaturized notification only arrives once the ~0.5s animation has finished. The Dock item carries only the window title, so WindowKit resolves it to a cached window (the frontmost app's first, then the most recently used).
+
+| Member | Type | Description |
+|---|---|---|
+| `minimizeStarts` | `AnyPublisher<CapturedWindow, Never>` | Windows that just started minimizing on their own (yellow button, Cmd+M, title-bar double-click), published on the main thread. |
+| `tracksMinimizeTransitions` | `Bool` | Opt-in toggle (default `false`). Flipping it live starts/stops the subsystem. |
+| `transitionDelegate` | `WindowTransitionDelegate?` | Told before and after the minimizes and restores WindowKit performs (`minimizeWindow`, `restoreWindow`, `toggleMinimizeWindow`, `focusWindow` on a minimized window). Each action waits for the `will` call to return. These minimizes are not republished on `minimizeStarts`. |
+
+Requires Accessibility permission, and the native Dock's "Minimize windows into application icon" turned off (that mode creates no per-window Dock item).
+
 ### Events
 
 Subscribe to window lifecycle changes via Combine:

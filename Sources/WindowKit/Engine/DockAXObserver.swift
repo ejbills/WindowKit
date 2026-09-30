@@ -15,7 +15,10 @@ import os
 final class DockAXObserver: @unchecked Sendable {
     /// Fired on the main run loop whenever a Dock item is created or destroyed.
     var onChange: (() -> Void)?
+    /// Fired on the main run loop with the element of each newly created Dock item.
+    var onCreated: ((AXUIElement) -> Void)?
 
+    private let runLoopMode: CFRunLoopMode
     private var observer: AXObserver?
     private var dockApp: AXUIElement?
     private var runningAppsObservation: NSKeyValueObservation?
@@ -27,6 +30,12 @@ final class DockAXObserver: @unchecked Sendable {
 
     /// The Dock's current process id, or 0 when it isn't running.
     var dockPID: pid_t { pid.withLock { $0 } }
+
+    /// `runLoopMode` `.commonModes` keeps notifications flowing while the main thread
+    /// is in a tracking mode (menus, drags, scrolling).
+    init(runLoopMode: CFRunLoopMode = .defaultMode) {
+        self.runLoopMode = runLoopMode
+    }
 
     func start() {
         registerDockObserver()
@@ -66,14 +75,14 @@ final class DockAXObserver: @unchecked Sendable {
             tearDownDockObserver()
             return
         }
-        CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(newObserver), .defaultMode)
+        CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(newObserver), runLoopMode)
         boundPID = dockPID
     }
 
     private func tearDownDockObserver() {
         boundPID = 0
         guard let observer else { return }
-        CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
+        CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), runLoopMode)
         if let dockApp {
             for notification in [kAXCreatedNotification, kAXUIElementDestroyedNotification] {
                 AXObserverRemoveNotification(observer, dockApp, notification as CFString)
@@ -83,9 +92,12 @@ final class DockAXObserver: @unchecked Sendable {
         dockApp = nil
     }
 
-    private static let observerCallback: AXObserverCallback = { _, _, _, refcon in
+    private static let observerCallback: AXObserverCallback = { _, element, notification, refcon in
         guard let refcon else { return }
         let observer = Unmanaged<DockAXObserver>.fromOpaque(refcon).takeUnretainedValue()
+        if notification as String == kAXCreatedNotification {
+            observer.onCreated?(element)
+        }
         observer.onChange?()
     }
 

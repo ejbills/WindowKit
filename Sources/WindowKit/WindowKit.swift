@@ -340,6 +340,30 @@ public final class WindowKit {
         }
     }
 
+    /// Windows that just started minimizing on their own (yellow button, Cmd+M, a title-bar
+    /// double-click), published on the main thread as the native Dock begins the animation,
+    /// ~0.5s before the owner app reports the minimize. Minimizes WindowKit performs itself
+    /// go to `transitionDelegate` instead. Requires `tracksMinimizeTransitions`.
+    public var minimizeStarts: AnyPublisher<CapturedWindow, Never> {
+        minimizeStartSubject.eraseToAnyPublisher()
+    }
+
+    /// Opt-in toggle for `minimizeStarts` (default `false`).
+    public var tracksMinimizeTransitions: Bool = false {
+        didSet {
+            guard oldValue != tracksMinimizeTransitions, isTrackingActive else { return }
+            if tracksMinimizeTransitions {
+                minimizeTransitionTracker.start()
+            } else {
+                minimizeTransitionTracker.stop()
+            }
+        }
+    }
+
+    /// Told about the minimizes and restores WindowKit performs, before and after each,
+    /// so a host can animate them.
+    @ObservationIgnored public weak var transitionDelegate: (any WindowTransitionDelegate)?
+
     public var permissionStatus: PermissionState {
         SystemPermissions.shared.currentState
     }
@@ -395,6 +419,14 @@ public final class WindowKit {
     private let orphanedWindowTracker = OrphanedWindowTracker()
     private let dockHandoffTracker = DockHandoffTracker()
     private let appSwitcherObserver = AppSwitcherObserver()
+    private let minimizeTransitionTracker = MinimizeTransitionTracker()
+    @ObservationIgnored private let minimizeStartSubject = PassthroughSubject<CapturedWindow, Never>()
+    /// Windows WindowKit is minimizing itself, with when the minimize was requested. Their
+    /// Dock item is expected and is not republished on `minimizeStarts`.
+    @ObservationIgnored private var ownMinimizes: [CGWindowID: Date] = [:]
+    /// Windows recently matched to a Dock item, so a burst of same-titled items (Minimize
+    /// All) maps to distinct windows.
+    @ObservationIgnored private var matchedMinimizeStarts: [CGWindowID: Date] = [:]
     private var isTrackingActive = false
     private let badgeStore = DockBadgeStore()
     private var cancellables = Set<AnyCancellable>()
@@ -526,6 +558,13 @@ public final class WindowKit {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] items in
                 self?.handoffItems = items
+            }
+            .store(in: &cancellables)
+
+        minimizeTransitionTracker.titlesPublisher
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] title in
+                self?.minimizeStarted(title: title)
             }
             .store(in: &cancellables)
 
@@ -759,24 +798,88 @@ public final class WindowKit {
     /// Minimizes the window, updating the cache immediately rather than waiting
     /// on AX notifications (unreliable under Stage Manager).
     public func minimizeWindow(_ window: CapturedWindow) async throws {
+        let transition = await beginMinimizeTransition(window)
+        defer { if let transition { transitionDelegate?.windowDidMinimize(transition) } }
         try await tracker.minimizeWindow(window)
     }
 
     /// Restores the window, updating the cache immediately.
     public func restoreWindow(_ window: CapturedWindow) async throws {
+        let transition = await beginRestoreTransition(window)
+        defer { if let transition { transitionDelegate?.windowDidRestore(transition) } }
         try await tracker.restoreWindow(window)
     }
 
     /// Toggles the window's minimized state, updating the cache immediately.
     @discardableResult
     public func toggleMinimizeWindow(_ window: CapturedWindow) async throws -> Bool {
-        try await tracker.toggleMinimizeWindow(window)
+        if cachedWindow(window).isMinimized {
+            let transition = await beginRestoreTransition(window)
+            defer { if let transition { transitionDelegate?.windowDidRestore(transition) } }
+            return try await tracker.toggleMinimizeWindow(window)
+        }
+        let transition = await beginMinimizeTransition(window)
+        defer { if let transition { transitionDelegate?.windowDidMinimize(transition) } }
+        return try await tracker.toggleMinimizeWindow(window)
     }
 
     /// Brings the window to front, reflecting its unminimize/unhide side effects
     /// in the cache immediately.
     public func focusWindow(_ window: CapturedWindow) async throws {
+        let transition = await beginRestoreTransition(window)
+        defer { if let transition { transitionDelegate?.windowDidRestore(transition) } }
         try await tracker.focusWindow(window)
+    }
+
+    // MARK: Minimize transitions
+
+    private static let minimizeStartMatchWindow: TimeInterval = 1.5
+
+    private func cachedWindow(_ window: CapturedWindow) -> CapturedWindow {
+        tracker.repository.readCache(windowID: window.id) ?? window
+    }
+
+    /// Tells the delegate WindowKit is about to minimize `window` and records the minimize as
+    /// WindowKit's own. Returns the window the delegate was told about, nil when it wasn't.
+    private func beginMinimizeTransition(_ window: CapturedWindow) async -> CapturedWindow? {
+        let current = cachedWindow(window)
+        guard let delegate = transitionDelegate, !current.isMinimized,
+              !tracker.repository.isExcludedOrIgnored(current.ownerPID)
+        else { return nil }
+        await delegate.windowWillMinimize(current)
+        ownMinimizes[current.id] = Date()
+        return current
+    }
+
+    /// Tells the delegate WindowKit is about to restore the minimized `window`. Returns the
+    /// window the delegate was told about, nil when it wasn't.
+    private func beginRestoreTransition(_ window: CapturedWindow) async -> CapturedWindow? {
+        let current = cachedWindow(window)
+        guard let delegate = transitionDelegate, current.isMinimized,
+              !tracker.repository.isExcludedOrIgnored(current.ownerPID)
+        else { return nil }
+        await delegate.windowWillRestore(current)
+        return current
+    }
+
+    /// Resolves the title of a Dock item that just appeared to the window being minimized: an
+    /// unminimized cached window with that title, the frontmost app's first, then the most
+    /// recently used. Never asks the owner app, whose main thread is busy in the minimize.
+    private func minimizeStarted(title: String) {
+        let now = Date()
+        ownMinimizes = ownMinimizes.filter { now.timeIntervalSince($0.value) < Self.minimizeStartMatchWindow }
+        matchedMinimizeStarts = matchedMinimizeStarts.filter { now.timeIntervalSince($0.value) < Self.minimizeStartMatchWindow }
+        let candidates = tracker.repository.readAllCache().filter {
+            !$0.isMinimized && ($0.title ?? "") == title && matchedMinimizeStarts[$0.id] == nil
+        }
+        let frontPID = frontmostApplication.flatMap(processIdentifier(of:))
+        let rank = { (window: CapturedWindow) in (window.ownerPID == frontPID ? 1 : 0, window.lastInteractionTime) }
+        guard let window = candidates.first(where: { ownMinimizes[$0.id] != nil })
+            ?? candidates.max(by: { rank($0) < rank($1) })
+        else { return }
+        matchedMinimizeStarts[window.id] = now
+        guard ownMinimizes.removeValue(forKey: window.id) == nil else { return }
+        minimizeStartSubject.send(window)
     }
 
     /// Hides the window's owner application, marking all its cached windows hidden.
@@ -911,6 +1014,9 @@ public final class WindowKit {
         if tracksProcessSwitcher {
             appSwitcherObserver.start()
         }
+        if tracksMinimizeTransitions {
+            minimizeTransitionTracker.start()
+        }
     }
 
     public func endTracking() {
@@ -919,6 +1025,7 @@ public final class WindowKit {
         orphanedWindowTracker.stop()
         dockHandoffTracker.stop()
         appSwitcherObserver.stop()
+        minimizeTransitionTracker.stop()
         tracker.stopTracking()
     }
 
