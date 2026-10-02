@@ -13,11 +13,6 @@ public final class WindowTracker {
 
     private let eventSubject = PassthroughSubject<WindowEvent, Never>()
 
-    public var agentWindowEvents: AnyPublisher<AgentWindowsEvent, Never> { floatingAgents.events }
-
-    func isFloatingAgent(_ app: NSRunningApplication) -> Bool { processWatcher.isFloatingAgent(app) }
-
-    private lazy var floatingAgents = FloatingAgentWatcher(axQueue: axQueue)
     var headless: Bool = false {
         didSet { discovery.screenshotService.headless = headless }
     }
@@ -142,9 +137,7 @@ public final class WindowTracker {
             }
             .store(in: &subscriptions)
 
-        processWatcher.floatingAgentBundleIDs = FloatingAgentWatcher.bundleIDs
         processWatcher.isTrackedPID = { [repository] pid in repository.trackedPIDs().contains(pid) }
-        processWatcher.runningFloatingAgents().forEach(floatingAgents.watch)
 
         let apps = processWatcher.runningApplications()
         Logger.debug("Found running applications", details: "count=\(apps.count)")
@@ -585,10 +578,6 @@ public final class WindowTracker {
             break
 
         case .applicationLaunched(let app):
-            if processWatcher.isFloatingAgent(app) {
-                floatingAgents.watch(app)
-                break
-            }
             repository.registerPID(app.processIdentifier)
             if !excludedBundleIDs.isEmpty, let bundleID = app.bundleIdentifier, excludedBundleIDs.contains(bundleID) {
                 repository.insertExcludedPID(app.processIdentifier)
@@ -605,7 +594,6 @@ public final class WindowTracker {
             }
 
         case .applicationTerminated(let pid):
-            floatingAgents.forget(pid: pid)
             repository.removeExcludedPID(pid)
             watchRetryAttempts.withLockUnchecked { _ = $0.removeValue(forKey: pid) }
             watcherManager?.unwatch(pid: pid)

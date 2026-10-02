@@ -241,9 +241,9 @@ public final class WindowKit {
 
     public var processEvents: AnyPublisher<ProcessEvent, Never> { tracker.processEvents }
 
-    /// Live window frames of floating system agents (the Screenshot toolbar
-    /// and thumbnail), see `FloatingAgentWatcher`.
-    public var agentWindowEvents: AnyPublisher<AgentWindowsEvent, Never> { tracker.agentWindowEvents }
+    /// Windows about to be focused through `focusWindow`, sent before any
+    /// AX work so a Space commit it starts can be prepared for.
+    let focusRequests = PassthroughSubject<CGWindowID, Never>()
 
     public private(set) var frontmostApplication: NSRunningApplication?
     public private(set) var trackedApplications: [NSRunningApplication] = []
@@ -431,7 +431,6 @@ public final class WindowKit {
                 guard let self else { return }
                 switch event {
                 case .applicationWillLaunch(let app):
-                    guard !self.tracker.isFloatingAgent(app) else { break }
                     let pid = app.processIdentifier
                     guard !self.launchingApplications.contains(where: { $0.processIdentifier == pid }) else { break }
                     self.launchingApplications.append(app)
@@ -440,7 +439,6 @@ public final class WindowKit {
                     self.refreshTrackedApplicationsFromRepository()
 
                 case .applicationLaunched(let app):
-                    guard !self.tracker.isFloatingAgent(app) else { break }
                     let launchedPID = app.processIdentifier
                     if self.launchingApplications.contains(where: { $0.processIdentifier == launchedPID }) {
                         self.scheduleLaunchTimeout(for: launchedPID, after: Self.postLaunchWindowGraceSeconds)
@@ -776,6 +774,7 @@ public final class WindowKit {
     /// Brings the window to front, reflecting its unminimize/unhide side effects
     /// in the cache immediately.
     public func focusWindow(_ window: CapturedWindow) async throws {
+        focusRequests.send(window.id)
         try await tracker.focusWindow(window)
     }
 
