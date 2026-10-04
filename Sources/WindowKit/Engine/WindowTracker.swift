@@ -226,7 +226,7 @@ public final class WindowTracker {
         }
 
         for pid in oldPIDs.subtracting(newPIDs) {
-            guard let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated else { continue }
+            guard let app = RunningApplicationResolver.application(forProcessIdentifier: pid), !app.isTerminated else { continue }
             ensureWatching(pid: pid, reason: "exclusionLifted")
             Task { [weak self] in
                 _ = await self?.trackApplication(app)
@@ -727,7 +727,7 @@ public final class WindowTracker {
                 self.watchRetryAttempts.withLockUnchecked { _ = $0.removeValue(forKey: pid) }
                 return
             }
-            guard let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated else {
+            guard let app = RunningApplicationResolver.application(forProcessIdentifier: pid), !app.isTerminated else {
                 self.watchRetryAttempts.withLockUnchecked { _ = $0.removeValue(forKey: pid) }
                 return
             }
@@ -761,7 +761,7 @@ public final class WindowTracker {
         // Watchers are detached for excluded PIDs, but events already in flight
         // when the exclusion changed must not trigger AX reads.
         guard !repository.isExcludedOrIgnored(pid) else { return }
-        guard let app = NSRunningApplication(processIdentifier: pid) else { return }
+        guard let app = RunningApplicationResolver.application(forProcessIdentifier: pid) else { return }
 
         // Post-cooldown full scan covers these; suppress to avoid redundant refreshes.
         if isInWakeCooldown {
@@ -1033,7 +1033,7 @@ public final class WindowTracker {
 
         debounce(key: "window-destroyed-\(pid)", interval: interval) { [weak self] in
             guard let self else { return }
-            guard let app = NSRunningApplication(processIdentifier: pid) else { return }
+            guard let app = RunningApplicationResolver.application(forProcessIdentifier: pid) else { return }
             Logger.debug("Destroy handler fired", details: "pid=\(pid), policy=\(app.activationPolicy.rawValue), terminated=\(app.isTerminated), hidden=\(app.isHidden)")
 
             if app.isHidden {

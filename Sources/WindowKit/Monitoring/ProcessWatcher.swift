@@ -47,7 +47,7 @@ public final class ProcessWatcher {
 
     public init() {
         self.events = eventSubject.eraseToAnyPublisher()
-        frontmostApplication = NSWorkspace.shared.frontmostApplication
+        frontmostApplication = NSWorkspace.shared.frontmostApplication.map { RunningApplicationResolver.resolving($0) }
         setupObservers()
     }
 
@@ -89,6 +89,7 @@ public final class ProcessWatcher {
     ) {
         activationQueue.async { [weak self] in
             guard app.activationPolicy == .regular else { return }
+            let app = RunningApplicationResolver.resolving(app)
             let pid = app.processIdentifier
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -115,7 +116,7 @@ public final class ProcessWatcher {
     }
 
     public func runningApplications() -> [NSRunningApplication] {
-        NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }
+        RunningApplicationResolver.resolving(NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular })
     }
 
     /// Whether a PID is tracked, so its exit is reported even when it was never marked
@@ -141,14 +142,15 @@ public final class ProcessWatcher {
                 continue
             }
 
-            let pid = app.processIdentifier
+            let resolved = RunningApplicationResolver.resolving(app)
+            let pid = resolved.processIdentifier
             pidsByIdentity[identity] = (app, pid)
             currentPIDs.insert(pid)
             guard !knownPIDs.contains(pid) else { continue }
             if app.activationPolicy == .regular {
-                markLaunched(app)
+                markLaunched(resolved)
             } else if pendingPolicyObservations[pid] == nil {
-                observePolicyFlip(of: app)
+                observePolicyFlip(of: resolved)
             }
         }
 
@@ -195,7 +197,7 @@ public final class ProcessWatcher {
         }
 
         eventSubject.send(.applicationWillLaunch(app))
-        let token = app.observe(\.isFinishedLaunching) { [weak self] app, _ in
+        let token = RunningApplicationResolver.observationTarget(app).observe(\.isFinishedLaunching) { [weak self] _, _ in
             DispatchQueue.main.async {
                 guard let self, app.isFinishedLaunching, !app.isTerminated else { return }
                 guard let pending = self.pendingFinishObservations.removeValue(forKey: pid) else { return }
@@ -215,7 +217,7 @@ public final class ProcessWatcher {
 
     private func observePolicyFlip(of app: NSRunningApplication) {
         let pid = app.processIdentifier
-        let token = app.observe(\.activationPolicy) { [weak self] app, _ in
+        let token = RunningApplicationResolver.observationTarget(app).observe(\.activationPolicy) { [weak self] _, _ in
             DispatchQueue.main.async {
                 guard let self, app.activationPolicy == .regular, !app.isTerminated else { return }
                 self.markLaunched(app)

@@ -617,7 +617,7 @@ public final class WindowKit {
                         }
                         return (app: published, pid: pid)
                     }
-                    guard let app = retained[pid] ?? NSRunningApplication(processIdentifier: pid) else {
+                    guard let app = retained[pid] ?? RunningApplicationResolver.application(forProcessIdentifier: pid) else {
                         if kill(pid, 0) == 0 { unresolvedLivePID = true }
                         return nil
                     }

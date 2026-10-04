@@ -78,7 +78,7 @@ public final class WindowRepository: @unchecked Sendable {
     public func trackedApplications() -> [NSRunningApplication] {
         let pids = trackedPIDs()
         return pids.compactMap { pid in
-            guard let app = NSRunningApplication(processIdentifier: pid),
+            guard let app = RunningApplicationResolver.application(forProcessIdentifier: pid),
                   app.activationPolicy == .regular else { return nil }
             return app
         }

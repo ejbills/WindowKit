@@ -27,7 +27,7 @@ public struct CapturedWindow: Identifiable, Hashable, @unchecked Sendable {
 
     public var preview: CGImage? { cachedPreview }
     public var ownerApplication: NSRunningApplication? {
-        NSRunningApplication(processIdentifier: ownerPID)
+        RunningApplicationResolver.application(forProcessIdentifier: ownerPID)
     }
 
     public init(

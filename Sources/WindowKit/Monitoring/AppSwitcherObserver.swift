@@ -436,14 +436,14 @@ final class AppSwitcherObserver: @unchecked Sendable {
            let bundle = Bundle(url: nsURL as URL),
            let bundleID = bundle.bundleIdentifier,
            let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first {
-            return (app.processIdentifier, bundleID)
+            return (RunningApplicationResolver.resolving(app).processIdentifier, bundleID)
         }
 
         if let title, !title.isEmpty {
             let apps = NSWorkspace.shared.runningApplications
             if let app = apps.first(where: { $0.localizedName == title })
                 ?? apps.first(where: { matchesLoosely($0.localizedName, title) }) {
-                return (app.processIdentifier, app.bundleIdentifier)
+                return (RunningApplicationResolver.resolving(app).processIdentifier, app.bundleIdentifier)
             }
         }
 
