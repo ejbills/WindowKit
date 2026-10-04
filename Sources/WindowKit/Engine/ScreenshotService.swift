@@ -1,4 +1,5 @@
 import Cocoa
+import ScreenCaptureKit
 
 public enum ScreenshotError: Error, Sendable {
     case permissionDenied
@@ -165,5 +166,34 @@ public struct ScreenshotService: Sendable {
         }
 
         return results
+    }
+
+    /// Composited screen contents of `rect` (global display coordinates, top-left origin) on one display, without the cursor.
+    public func captureDisplayRegion(_ rect: CGRect, displayID: CGDirectDisplayID, scale: CGFloat) async throws -> CGImage {
+        guard !headless, SystemPermissions.hasScreenRecording() else {
+            throw ScreenshotError.permissionDenied
+        }
+        let content: SCShareableContent? = await ConcurrencyHelpers.withTimeoutOptional {
+            try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+        }
+        guard let display = content?.displays.first(where: { $0.displayID == displayID }) else {
+            throw ScreenshotError.captureFailure
+        }
+
+        let displayBounds = CGDisplayBounds(displayID)
+        let configuration = SCStreamConfiguration()
+        configuration.sourceRect = rect.offsetBy(dx: -displayBounds.minX, dy: -displayBounds.minY)
+        configuration.width = Int(rect.width * scale)
+        configuration.height = Int(rect.height * scale)
+        configuration.showsCursor = false
+
+        do {
+            return try await SCScreenshotManager.captureImage(
+                contentFilter: SCContentFilter(display: display, excludingWindows: []),
+                configuration: configuration
+            )
+        } catch {
+            throw ScreenshotError.captureFailure
+        }
     }
 }

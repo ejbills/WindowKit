@@ -374,8 +374,8 @@ public func cgWindowDescriptors(forPID pid: pid_t) -> [CGWindowDescriptor] {
     }
 }
 
-/// Layer-0 windows currently on screen, front to back.
-public func cgOnScreenWindowDescriptors() -> [CGWindowDescriptor] {
+/// Windows currently on screen at `layer`, front to back. Pass nil for every layer.
+public func cgOnScreenWindowDescriptors(layer: Int? = 0) -> [CGWindowDescriptor] {
     guard let windowList = CGWindowListCopyWindowInfo(
         [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
     ) as? [[String: AnyObject]] else {
@@ -383,7 +383,7 @@ public func cgOnScreenWindowDescriptors() -> [CGWindowDescriptor] {
     }
 
     return windowList.compactMap { dict -> CGWindowDescriptor? in
-        guard let descriptor = CGWindowDescriptor(from: dict), descriptor.layer == 0 else {
+        guard let descriptor = CGWindowDescriptor(from: dict), layer == nil || descriptor.layer == layer else {
             return nil
         }
         return descriptor
