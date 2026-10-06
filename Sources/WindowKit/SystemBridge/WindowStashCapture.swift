@@ -28,18 +28,18 @@ public final class WindowStashCapture: @unchecked Sendable {
         cursor = frontier
     }
 
-    /// The newest window ID, read off a window created and closed for the purpose.
-    @MainActor
-    public static func newestWindowID() -> CGWindowID {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1, height: 1), styleMask: .borderless, backing: .buffered, defer: false)
-        window.isReleasedWhenClosed = false
-        let windowID = CGWindowID(window.windowNumber)
-        window.close()
+    /// The newest window ID, read off a window created and released for the purpose.
+    private static func newestWindowID() throws -> CGWindowID {
+        guard let windowID = cgsAllocateWindowID(cgsMainConnection()) else {
+            throw WindowSpaceError.operationUnavailable("SLSNewWindow")
+        }
         return windowID
     }
 
-    /// Creates the stash Space and starts capturing windows with IDs past `frontier` whose owner pid matches.
-    public static func begin(after frontier: CGWindowID, capturingWindowsOf ownerMatches: @escaping @Sendable (pid_t) -> Bool) throws -> WindowStashCapture {
+    /// Creates the stash Space and starts capturing the windows that processes whose pid matches create from
+    /// now on. Safe off the main thread.
+    public static func begin(capturingWindowsOf ownerMatches: @escaping @Sendable (pid_t) -> Bool) throws -> WindowStashCapture {
+        let frontier = try newestWindowID()
         let capture = try WindowStashCapture(spaceID: WindowStash.createSpace(), frontier: frontier, ownerMatches: ownerMatches)
         let thread = Thread { capture.watch() }
         thread.qualityOfService = .userInteractive

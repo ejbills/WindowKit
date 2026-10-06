@@ -165,6 +165,12 @@ private typealias SLSCopyWindowsWithOptionsAndTagsType = @convention(c) (CGSConn
 private var copyWindowsWithOptionsAndTagsPtr: SLSCopyWindowsWithOptionsAndTagsType?
 private typealias SLSWindowIsOrderedInType = @convention(c) (CGSConnectionID, CGWindowID, UnsafeMutablePointer<Bool>) -> CGError
 private var windowIsOrderedInPtr: SLSWindowIsOrderedInType?
+private typealias SLSNewWindowType = @convention(c) (CGSConnectionID, Int32, Float, Float, CFTypeRef, UnsafeMutablePointer<CGWindowID>) -> CGError
+private var newWindowPtr: SLSNewWindowType?
+private typealias SLSReleaseWindowType = @convention(c) (CGSConnectionID, CGWindowID) -> CGError
+private var releaseWindowPtr: SLSReleaseWindowType?
+private typealias CGSNewRegionWithRectType = @convention(c) (UnsafePointer<CGRect>, UnsafeMutablePointer<Unmanaged<CFTypeRef>?>) -> CGError
+private var newRegionWithRectPtr: CGSNewRegionWithRectType?
 
 private func loadSkyLightFunctions() {
     guard skyLightHandle == nil else { return }
@@ -218,6 +224,18 @@ private func loadSkyLightFunctions() {
 
     if let symbol = dlsym(handle, "SLSWindowIsOrderedIn") {
         windowIsOrderedInPtr = unsafeBitCast(symbol, to: SLSWindowIsOrderedInType.self)
+    }
+
+    if let symbol = dlsym(handle, "SLSNewWindow") {
+        newWindowPtr = unsafeBitCast(symbol, to: SLSNewWindowType.self)
+    }
+
+    if let symbol = dlsym(handle, "SLSReleaseWindow") {
+        releaseWindowPtr = unsafeBitCast(symbol, to: SLSReleaseWindowType.self)
+    }
+
+    if let symbol = dlsym(handle, "CGSNewRegionWithRect") {
+        newRegionWithRectPtr = unsafeBitCast(symbol, to: CGSNewRegionWithRectType.self)
     }
 }
 
@@ -312,6 +330,21 @@ public func cgsWindowLevel(_ connection: CGSConnectionID, _ windowID: CGWindowID
     var level: Int32 = 0
     _ = CGSGetWindowLevel(connection, UInt32(windowID), &level)
     return level
+}
+
+/// Creates a window that is never ordered in, releases it, and returns its ID. WindowServer allocates
+/// window IDs in sequence, so every window created before the call has a lower ID. Safe off the main
+/// thread. Nil when the calls are unavailable or fail.
+func cgsAllocateWindowID(_ connection: CGSConnectionID) -> CGWindowID? {
+    loadSkyLightFunctions()
+    guard let newWindowPtr, let releaseWindowPtr, let newRegionWithRectPtr else { return nil }
+    var rect = CGRect(x: 0, y: 0, width: 1, height: 1)
+    var region: Unmanaged<CFTypeRef>?
+    guard newRegionWithRectPtr(&rect, &region) == .success, let region = region?.takeRetainedValue() else { return nil }
+    var windowID: CGWindowID = 0
+    guard newWindowPtr(connection, 2, 0, 0, region, &windowID) == .success else { return nil }
+    _ = releaseWindowPtr(connection, windowID)
+    return windowID
 }
 
 /// Pid of the process owning a window, whether or not it is ordered in. Nil when no window has the ID.
