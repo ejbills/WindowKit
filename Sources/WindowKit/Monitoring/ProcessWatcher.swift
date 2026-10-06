@@ -19,7 +19,9 @@ public final class ProcessWatcher {
     private var pendingPolicyObservations: [pid_t: PolicyObservation] = [:]
     private var pendingFinishObservations: [pid_t: PolicyObservation] = [:]
     private var pidsByIdentity: [ObjectIdentifier: (app: NSRunningApplication, pid: pid_t)] = [:]
-    private let retirementQueue = DispatchQueue(label: "com.windowkit.process-observation-retirement", qos: .utility)
+    private var retiredObservations: [PolicyObservation] = []
+    private var retirementDrain: DispatchWorkItem?
+    private var retirementDeadline: DispatchTime?
     private let activationQueue = DispatchQueue(label: "com.windowkit.activation-policy", qos: .userInitiated)
     private var deliveredPIDs: [ObjectIdentifier: (app: NSRunningApplication, pid: pid_t)] = [:]
     private var deliveredOrder: [ObjectIdentifier] = []
@@ -42,6 +44,12 @@ public final class ProcessWatcher {
 
     /// Backstop for a launching app whose `isFinishedLaunching` never flips.
     private static let launchFinishTimeout: TimeInterval = 30
+
+    /// Quiet period after the last launch or exit before retired observations are invalidated.
+    private static let retirementQuietPeriod: TimeInterval = 1.5
+
+    /// Longest a retired observation waits while launches and exits keep arriving.
+    private static let retirementMaxDelay: TimeInterval = 10
 
     public private(set) var frontmostApplication: NSRunningApplication?
 
@@ -68,16 +76,31 @@ public final class ProcessWatcher {
         pendingPolicyObservations.removeAll()
         pendingFinishObservations.values.forEach { $0.invalidate() }
         pendingFinishObservations.removeAll()
+        retirementDrain?.cancel()
+        drainRetiredObservations()
         pidsByIdentity.removeAll()
     }
 
-    /// Invalidates observations on `retirementQueue`: each removal is a synchronous LaunchServices
-    /// round-trip. Registration must stay on main, where LaunchServices schedules the notification.
+    /// Invalidates on main, where AppKit's observer bookkeeping lives, once launches and exits have been
+    /// quiet for `retirementQuietPeriod`: each removal is a LaunchServices round-trip that stalls during exits.
     private func retire(_ observations: [PolicyObservation]) {
-        guard !observations.isEmpty else { return }
-        retirementQueue.async {
-            observations.forEach { $0.invalidate() }
-        }
+        retiredObservations.append(contentsOf: observations)
+        guard !retiredObservations.isEmpty else { return }
+        let now = DispatchTime.now()
+        let deadline = retirementDeadline ?? now + Self.retirementMaxDelay
+        retirementDeadline = deadline
+        retirementDrain?.cancel()
+        let drain = DispatchWorkItem { [weak self] in self?.drainRetiredObservations() }
+        retirementDrain = drain
+        DispatchQueue.main.asyncAfter(deadline: min(now + Self.retirementQuietPeriod, deadline), execute: drain)
+    }
+
+    private func drainRetiredObservations() {
+        let retired = retiredObservations
+        retiredObservations.removeAll()
+        retirementDrain = nil
+        retirementDeadline = nil
+        retired.forEach { $0.invalidate() }
     }
 
     /// Reads `app.activationPolicy` on `activationQueue` and, for a `.regular` app, runs `deliver`
