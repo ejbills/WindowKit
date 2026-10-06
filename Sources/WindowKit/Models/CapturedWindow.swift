@@ -79,6 +79,14 @@ public struct CapturedWindow: Identifiable, Hashable, @unchecked Sendable {
     }
 
     func replacingCreationTime(_ creationTime: Date) -> CapturedWindow {
+        replacing(title: title, creationTime: creationTime)
+    }
+
+    func replacingTitle(_ title: String) -> CapturedWindow {
+        replacing(title: title, creationTime: creationTime)
+    }
+
+    private func replacing(title: String?, creationTime: Date) -> CapturedWindow {
         var window = CapturedWindow(
             id: id,
             title: title,

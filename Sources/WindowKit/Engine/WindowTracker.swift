@@ -899,27 +899,11 @@ public final class WindowTracker {
             let windowID = try? element.windowID()
             updateWindowTimestamp(windowID: windowID, pid: pid)
 
-        case .titleChanged(let element):
+        case .titleChanged:
             // Coalesced: apps rewriting their title continuously would starve
             // a debounce, and the AX reads must not run per event.
             coalesce(key: "title-\(pid)") { [weak self] in
-                guard let self else { return }
-                let windowID = try? element.windowID()
-                guard (try? element.role()) == kAXWindowRole as String,
-                      let newTitle = try? element.title() else { return }
-                updateWindowState(windowID: windowID, element: element, pid: pid) { window in
-                    guard window.title != newTitle else { return nil }
-                    return CapturedWindow(
-                        id: window.id, title: newTitle, ownerBundleID: window.ownerBundleID,
-                        ownerPID: window.ownerPID, bounds: window.bounds,
-                        isMinimized: window.isMinimized, isFullscreen: window.isFullscreen,
-                        isOwnerHidden: window.isOwnerHidden, isVisible: window.isVisible,
-                        owningDisplayID: window.owningDisplayID, desktopSpace: window.desktopSpace,
-                        lastInteractionTime: window.lastInteractionTime, creationTime: window.creationTime,
-                        axElement: window.axElement, appAxElement: window.appAxElement,
-                        closeButton: window.closeButton, subrole: window.subrole
-                    )
-                }
+                self?.refreshTitles(pid: pid)
             }
 
         case .windowResized(let element), .windowMoved(let element):
@@ -972,6 +956,21 @@ public final class WindowTracker {
             windows.insert(updated)
         }
         emitChanges(changes)
+    }
+
+    /// Re-reads the title of every cached window of the process and stores the ones that changed. Title
+    /// notifications also come from non-window elements (a browser's tabs and web areas), and several windows can
+    /// change within one coalescing interval.
+    private func refreshTitles(pid: pid_t) {
+        let retitled = repository.readCache(forPID: pid).compactMap { window -> (CapturedWindow, String)? in
+            guard let title = try? window.axElement.title(), title != window.title else { return nil }
+            return (window, title)
+        }
+        for (window, title) in retitled {
+            updateWindowState(windowID: window.id, element: window.axElement, pid: pid) { current in
+                current.title == title ? nil : current.replacingTitle(title)
+            }
+        }
     }
 
     private func updateWindowTimestamp(windowID: CGWindowID?, pid: pid_t) {
