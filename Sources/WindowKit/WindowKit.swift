@@ -396,7 +396,8 @@ public final class WindowKit {
     private let dockHandoffTracker = DockHandoffTracker()
     private let appSwitcherObserver = AppSwitcherObserver()
     private var isTrackingActive = false
-    private let badgeStore = DockBadgeStore()
+    private nonisolated static let sharedBadgeStore = DockBadgeStore()
+    private let badgeStore = WindowKit.sharedBadgeStore
     private var cancellables = Set<AnyCancellable>()
     @ObservationIgnored private var appStates: [pid_t: AppWindowState] = [:]
     /// PIDs parallel to `trackedApplications`; reading `processIdentifier` on an exiting app is a synchronous LaunchServices fetch.
@@ -1033,6 +1034,12 @@ public final class WindowKit {
         badgeStates[lookup] = state
         refreshBadge(forBundleIdentifier: bundleIdentifier)
         return state
+    }
+
+    /// The Dock's application tiles for a bundle, in Dock order. Separate instances of one app have one tile each.
+    /// Safe off the main thread.
+    public nonisolated static func dockTiles(bundleIdentifier: String) -> [AXUIElement] {
+        sharedBadgeStore.dockItemElements(bundleIdentifier: bundleIdentifier)
     }
 
     public func badgeState(forBundleURL bundleURL: URL) -> AppBadgeState {

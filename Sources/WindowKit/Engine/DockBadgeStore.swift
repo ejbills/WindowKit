@@ -257,6 +257,16 @@ public final class DockBadgeStore: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// The Dock's application tiles for a bundle, in Dock order. Separate instances of one app have one tile each.
+    public func dockItemElements(bundleIdentifier: String) -> [AXUIElement] {
+        guard let key = DockAppKey.bundleIdentifier(bundleIdentifier) else { return [] }
+        if let elements = getCachedElements(for: [key]) {
+            return elements
+        }
+        rebuildCache()
+        return getCachedElements(for: [key]) ?? []
+    }
+
     // MARK: - Private
 
     private func getCachedElement(for appKeys: [DockAppKey]) -> AXUIElement? {
