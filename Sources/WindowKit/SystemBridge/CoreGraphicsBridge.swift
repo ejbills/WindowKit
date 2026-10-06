@@ -47,6 +47,19 @@ func CGSGetWindowLevel(
     _ outLevel: UnsafeMutablePointer<Int32>
 ) -> Int32
 
+@_silgen_name("CGSGetWindowOwner")
+func CGSGetWindowOwner(
+    _ connection: CGSConnectionID,
+    _ windowID: UInt32,
+    _ outOwner: UnsafeMutablePointer<CGSConnectionID>
+) -> Int32
+
+@_silgen_name("CGSConnectionGetPID")
+func CGSConnectionGetPID(
+    _ connection: CGSConnectionID,
+    _ outPID: UnsafeMutablePointer<pid_t>
+) -> Int32
+
 @_silgen_name("CGSCopyWindowProperty")
 func CGSCopyWindowProperty(
     _ connection: CGSConnectionID,
@@ -299,6 +312,15 @@ public func cgsWindowLevel(_ connection: CGSConnectionID, _ windowID: CGWindowID
     var level: Int32 = 0
     _ = CGSGetWindowLevel(connection, UInt32(windowID), &level)
     return level
+}
+
+/// Pid of the process owning a window, whether or not it is ordered in. Nil when no window has the ID.
+public func cgsWindowOwnerPID(_ connection: CGSConnectionID, _ windowID: CGWindowID) -> pid_t? {
+    var owner: CGSConnectionID = 0
+    guard CGSGetWindowOwner(connection, UInt32(windowID), &owner) == 0 else { return nil }
+    var pid: pid_t = 0
+    guard CGSConnectionGetPID(owner, &pid) == 0 else { return nil }
+    return pid
 }
 
 public func cgsWindowTitle(_ connection: CGSConnectionID, _ windowID: CGWindowID) -> String? {
