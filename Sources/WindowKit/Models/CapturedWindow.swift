@@ -149,13 +149,11 @@ extension CapturedWindow {
             bytes[0x3A] = 0x10
             var widCopy = UInt32(wid)
             memcpy(&bytes[0x3C], &widCopy, MemoryLayout<UInt32>.size)
-            // Click just outside the frame: makes the window key without hit-testing content
-            // (top-left would close Chrome/Brave PWA shims).
-            var clickPoint = CGPoint(x: -1, y: -1)
+            // Mouse-down only, far off the frame: makes the window key without clicking content
+            // or its resize grab region (two quick down/up pairs there resize like a corner double-click).
+            var clickPoint = CGPoint(x: 300_000, y: 300_000)
             memcpy(&bytes[0x20], &clickPoint, MemoryLayout<CGPoint>.size)
             bytes[0x08] = 0x01
-            _ = SLPSPostEventRecordTo(&psn, &bytes)
-            bytes[0x08] = 0x02
             _ = SLPSPostEventRecordTo(&psn, &bytes)
 
             try axEl.performAction(kAXRaiseAction)
