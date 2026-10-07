@@ -348,7 +348,7 @@ struct WindowDiscovery {
         let capture = await onAXQueue { () -> CapturedWindow? in
             guard let descriptor = cgWindowDescriptor(forWindowID: windowID),
                   !repository.isExcludedOrIgnored(descriptor.ownerPID),
-                  let app = NSRunningApplication(processIdentifier: descriptor.ownerPID)
+                  let app = RunningApplicationResolver.application(forProcessIdentifier: descriptor.ownerPID)
             else { return nil }
             let appElement = AXUIElementCreateApplication(descriptor.ownerPID)
             guard let axWindow = enumerator.enumerateWindows(forPID: descriptor.ownerPID, seeking: [windowID])

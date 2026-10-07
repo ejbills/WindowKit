@@ -241,9 +241,9 @@ public final class WindowKit {
 
     public var processEvents: AnyPublisher<ProcessEvent, Never> { tracker.processEvents }
 
-    /// Live window frames of floating system agents (the Screenshot toolbar
-    /// and thumbnail), see `FloatingAgentWatcher`.
-    public var agentWindowEvents: AnyPublisher<AgentWindowsEvent, Never> { tracker.agentWindowEvents }
+    /// Windows about to be focused through `focusWindow`, sent before any
+    /// AX work so a Space commit it starts can be prepared for.
+    let focusRequests = PassthroughSubject<CGWindowID, Never>()
 
     public private(set) var frontmostApplication: NSRunningApplication?
     public private(set) var trackedApplications: [NSRunningApplication] = []
@@ -428,7 +428,8 @@ public final class WindowKit {
     /// All) maps to distinct windows.
     @ObservationIgnored private var matchedMinimizeStarts: [CGWindowID: Date] = [:]
     private var isTrackingActive = false
-    private let badgeStore = DockBadgeStore()
+    private nonisolated static let sharedBadgeStore = DockBadgeStore()
+    private let badgeStore = WindowKit.sharedBadgeStore
     private var cancellables = Set<AnyCancellable>()
     @ObservationIgnored private var appStates: [pid_t: AppWindowState] = [:]
     /// PIDs parallel to `trackedApplications`; reading `processIdentifier` on an exiting app is a synchronous LaunchServices fetch.
@@ -463,7 +464,6 @@ public final class WindowKit {
                 guard let self else { return }
                 switch event {
                 case .applicationWillLaunch(let app):
-                    guard !self.tracker.isFloatingAgent(app) else { break }
                     let pid = app.processIdentifier
                     guard !self.launchingApplications.contains(where: { $0.processIdentifier == pid }) else { break }
                     self.launchingApplications.append(app)
@@ -472,7 +472,6 @@ public final class WindowKit {
                     self.refreshTrackedApplicationsFromRepository()
 
                 case .applicationLaunched(let app):
-                    guard !self.tracker.isFloatingAgent(app) else { break }
                     let launchedPID = app.processIdentifier
                     if self.launchingApplications.contains(where: { $0.processIdentifier == launchedPID }) {
                         self.scheduleLaunchTimeout(for: launchedPID, after: Self.postLaunchWindowGraceSeconds)
@@ -658,7 +657,7 @@ public final class WindowKit {
                         }
                         return (app: published, pid: pid)
                     }
-                    guard let app = retained[pid] ?? NSRunningApplication(processIdentifier: pid) else {
+                    guard let app = retained[pid] ?? RunningApplicationResolver.application(forProcessIdentifier: pid) else {
                         if kill(pid, 0) == 0 { unresolvedLivePID = true }
                         return nil
                     }
@@ -826,6 +825,7 @@ public final class WindowKit {
     /// Brings the window to front, reflecting its unminimize/unhide side effects
     /// in the cache immediately.
     public func focusWindow(_ window: CapturedWindow) async throws {
+        focusRequests.send(window.id)
         let transition = await beginRestoreTransition(window)
         defer { if let transition { transitionDelegate?.windowDidRestore(transition) } }
         try await tracker.focusWindow(window)
@@ -1141,6 +1141,12 @@ public final class WindowKit {
         badgeStates[lookup] = state
         refreshBadge(forBundleIdentifier: bundleIdentifier)
         return state
+    }
+
+    /// The Dock's application tiles for a bundle, in Dock order. Separate instances of one app have one tile each.
+    /// Safe off the main thread.
+    public nonisolated static func dockTiles(bundleIdentifier: String) -> [AXUIElement] {
+        sharedBadgeStore.dockItemElements(bundleIdentifier: bundleIdentifier)
     }
 
     public func badgeState(forBundleURL bundleURL: URL) -> AppBadgeState {

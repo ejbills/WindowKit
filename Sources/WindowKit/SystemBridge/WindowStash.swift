@@ -1,5 +1,6 @@
 import Cocoa
 import ObjectiveC.runtime
+import os
 
 /// Invokes one of SkyLight's `SLSBridged*Operation` classes.
 ///
@@ -75,6 +76,7 @@ public enum WindowStash {
     /// Level 400 (`kCGSSpaceAbsoluteLevelNotificationCenterAtScreenLock`) keeps
     /// the Space out of the display's normal Space ordering.
     private static let stashSpaceLevel: Int32 = 400
+    private static let spaceCreations = OSAllocatedUnfairLock(initialState: (inFlight: 0, lastFinished: CFAbsoluteTime(0)))
 
     /// Creates a Space that no display shows: it never appears in Mission
     /// Control and is absent from `SLSCopyManagedDisplaySpaces`.
@@ -83,6 +85,13 @@ public enum WindowStash {
     /// windows still stashed leaks it until logout. Destroy it once the last
     /// window has been restored.
     public static func createSpace() throws -> CGSSpaceID {
+        spaceCreations.withLock { $0.inFlight += 1 }
+        defer {
+            spaceCreations.withLock {
+                $0.inFlight -= 1
+                $0.lastFinished = CFAbsoluteTimeGetCurrent()
+            }
+        }
         let operation = try BridgedWindowManagementOperation.make(
             "SLSBridgedSpaceCreateOperation",
             selector: "initWithOptions:values:"
@@ -101,6 +110,12 @@ public enum WindowStash {
 
         try setAbsoluteLevel(stashSpaceLevel, of: spaceID)
         return spaceID
+    }
+
+    /// Whether `createSpace()` is running or returned within `grace` seconds. Creating a Space posts
+    /// SkyLight's Exposé transition event, which `ExposeStateSignal` drops while this holds.
+    static func isCreatingSpace(within grace: TimeInterval) -> Bool {
+        spaceCreations.withLock { $0.inFlight > 0 || CFAbsoluteTimeGetCurrent() - $0.lastFinished < grace }
     }
 
     /// Moves the windows into `spaceID`, removing them from every Space they

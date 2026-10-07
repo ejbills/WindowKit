@@ -13,11 +13,6 @@ public final class WindowTracker {
 
     private let eventSubject = PassthroughSubject<WindowEvent, Never>()
 
-    public var agentWindowEvents: AnyPublisher<AgentWindowsEvent, Never> { floatingAgents.events }
-
-    func isFloatingAgent(_ app: NSRunningApplication) -> Bool { processWatcher.isFloatingAgent(app) }
-
-    private lazy var floatingAgents = FloatingAgentWatcher(axQueue: axQueue)
     var headless: Bool = false {
         didSet { discovery.screenshotService.headless = headless }
     }
@@ -142,9 +137,7 @@ public final class WindowTracker {
             }
             .store(in: &subscriptions)
 
-        processWatcher.floatingAgentBundleIDs = FloatingAgentWatcher.bundleIDs
         processWatcher.isTrackedPID = { [repository] pid in repository.trackedPIDs().contains(pid) }
-        processWatcher.runningFloatingAgents().forEach(floatingAgents.watch)
 
         let apps = processWatcher.runningApplications()
         Logger.debug("Found running applications", details: "count=\(apps.count)")
@@ -233,7 +226,7 @@ public final class WindowTracker {
         }
 
         for pid in oldPIDs.subtracting(newPIDs) {
-            guard let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated else { continue }
+            guard let app = RunningApplicationResolver.application(forProcessIdentifier: pid), !app.isTerminated else { continue }
             ensureWatching(pid: pid, reason: "exclusionLifted")
             Task { [weak self] in
                 _ = await self?.trackApplication(app)
@@ -585,10 +578,6 @@ public final class WindowTracker {
             break
 
         case .applicationLaunched(let app):
-            if processWatcher.isFloatingAgent(app) {
-                floatingAgents.watch(app)
-                break
-            }
             repository.registerPID(app.processIdentifier)
             if !excludedBundleIDs.isEmpty, let bundleID = app.bundleIdentifier, excludedBundleIDs.contains(bundleID) {
                 repository.insertExcludedPID(app.processIdentifier)
@@ -605,7 +594,6 @@ public final class WindowTracker {
             }
 
         case .applicationTerminated(let pid):
-            floatingAgents.forget(pid: pid)
             repository.removeExcludedPID(pid)
             watchRetryAttempts.withLockUnchecked { _ = $0.removeValue(forKey: pid) }
             watcherManager?.unwatch(pid: pid)
@@ -739,7 +727,7 @@ public final class WindowTracker {
                 self.watchRetryAttempts.withLockUnchecked { _ = $0.removeValue(forKey: pid) }
                 return
             }
-            guard let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated else {
+            guard let app = RunningApplicationResolver.application(forProcessIdentifier: pid), !app.isTerminated else {
                 self.watchRetryAttempts.withLockUnchecked { _ = $0.removeValue(forKey: pid) }
                 return
             }
@@ -773,7 +761,7 @@ public final class WindowTracker {
         // Watchers are detached for excluded PIDs, but events already in flight
         // when the exclusion changed must not trigger AX reads.
         guard !repository.isExcludedOrIgnored(pid) else { return }
-        guard let app = NSRunningApplication(processIdentifier: pid) else { return }
+        guard let app = RunningApplicationResolver.application(forProcessIdentifier: pid) else { return }
 
         // Post-cooldown full scan covers these; suppress to avoid redundant refreshes.
         if isInWakeCooldown {
@@ -911,27 +899,11 @@ public final class WindowTracker {
             let windowID = try? element.windowID()
             updateWindowTimestamp(windowID: windowID, pid: pid)
 
-        case .titleChanged(let element):
+        case .titleChanged:
             // Coalesced: apps rewriting their title continuously would starve
             // a debounce, and the AX reads must not run per event.
             coalesce(key: "title-\(pid)") { [weak self] in
-                guard let self else { return }
-                let windowID = try? element.windowID()
-                guard (try? element.role()) == kAXWindowRole as String,
-                      let newTitle = try? element.title() else { return }
-                updateWindowState(windowID: windowID, element: element, pid: pid) { window in
-                    guard window.title != newTitle else { return nil }
-                    return CapturedWindow(
-                        id: window.id, title: newTitle, ownerBundleID: window.ownerBundleID,
-                        ownerPID: window.ownerPID, bounds: window.bounds,
-                        isMinimized: window.isMinimized, isFullscreen: window.isFullscreen,
-                        isOwnerHidden: window.isOwnerHidden, isVisible: window.isVisible,
-                        owningDisplayID: window.owningDisplayID, desktopSpace: window.desktopSpace,
-                        lastInteractionTime: window.lastInteractionTime, creationTime: window.creationTime,
-                        axElement: window.axElement, appAxElement: window.appAxElement,
-                        closeButton: window.closeButton, subrole: window.subrole
-                    )
-                }
+                self?.refreshTitles(pid: pid)
             }
 
         case .windowResized(let element), .windowMoved(let element):
@@ -984,6 +956,21 @@ public final class WindowTracker {
             windows.insert(updated)
         }
         emitChanges(changes)
+    }
+
+    /// Re-reads the title of every cached window of the process and stores the ones that changed. Title
+    /// notifications also come from non-window elements (a browser's tabs and web areas), and several windows can
+    /// change within one coalescing interval.
+    private func refreshTitles(pid: pid_t) {
+        let retitled = repository.readCache(forPID: pid).compactMap { window -> (CapturedWindow, String)? in
+            guard let title = try? window.axElement.title(), title != window.title else { return nil }
+            return (window, title)
+        }
+        for (window, title) in retitled {
+            updateWindowState(windowID: window.id, element: window.axElement, pid: pid) { current in
+                current.title == title ? nil : current.replacingTitle(title)
+            }
+        }
     }
 
     private func updateWindowTimestamp(windowID: CGWindowID?, pid: pid_t) {
@@ -1045,7 +1032,7 @@ public final class WindowTracker {
 
         debounce(key: "window-destroyed-\(pid)", interval: interval) { [weak self] in
             guard let self else { return }
-            guard let app = NSRunningApplication(processIdentifier: pid) else { return }
+            guard let app = RunningApplicationResolver.application(forProcessIdentifier: pid) else { return }
             Logger.debug("Destroy handler fired", details: "pid=\(pid), policy=\(app.activationPolicy.rawValue), terminated=\(app.isTerminated), hidden=\(app.isHidden)")
 
             if app.isHidden {

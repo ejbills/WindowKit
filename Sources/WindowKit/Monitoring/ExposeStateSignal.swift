@@ -14,9 +14,13 @@ public enum ExposeEvent: Sendable {
 /// polling. The event carries no payload; the consumer validates the state
 /// (for Show Desktop, every window animating off screen) itself. A consumer
 /// owns one instance, calls `start()`, and `stop()`s or releases it.
+/// Transition events posted by `WindowStash.createSpace()` are dropped;
+/// Mission Control still posts its state event.
 @MainActor
 public final class ExposeStateSignal {
     public var events: AnyPublisher<ExposeEvent, Never> { subject.eraseToAnyPublisher() }
+
+    private static let ownSpaceCreationGrace: TimeInterval = 0.25
 
     private let subject = PassthroughSubject<ExposeEvent, Never>()
     private var notifier: SkyLightConnectionNotifier?
@@ -27,6 +31,9 @@ public final class ExposeStateSignal {
     public func start() {
         guard notifier == nil else { return }
         notifier = SkyLightConnectionNotifier(events: [.exposeTransitionBegan, .dockExposeStateChanged]) { [weak self] event, _ in
+            if event == .exposeTransitionBegan, WindowStash.isCreatingSpace(within: Self.ownSpaceCreationGrace) {
+                return
+            }
             self?.subject.send(event == .exposeTransitionBegan ? .transitionBegan : .stateChanged)
         }
     }

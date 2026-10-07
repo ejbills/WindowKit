@@ -14,7 +14,8 @@ enum SkyLightEvent: UInt32 {
     case windowRemovedFromSpace = 1326
     /// An Exposé transition begins, in both directions: ~500ms before the
     /// Space change on Mission Control entry and exit, ~300ms before Mission
-    /// Control's window is torn down on exit.
+    /// Control's window is torn down on exit. Also posted once per Space
+    /// created through `SLSBridgedSpaceCreateOperation` (`WindowStash.createSpace()`).
     case exposeTransitionBegan = 1327
     /// The Dock's Exposé state changed: at the start of Show Desktop (~120ms
     /// before the windows move) and when it ends; at Mission Control entry,

@@ -27,7 +27,7 @@ public struct CapturedWindow: Identifiable, Hashable, @unchecked Sendable {
 
     public var preview: CGImage? { cachedPreview }
     public var ownerApplication: NSRunningApplication? {
-        NSRunningApplication(processIdentifier: ownerPID)
+        RunningApplicationResolver.application(forProcessIdentifier: ownerPID)
     }
 
     public init(
@@ -79,6 +79,14 @@ public struct CapturedWindow: Identifiable, Hashable, @unchecked Sendable {
     }
 
     func replacingCreationTime(_ creationTime: Date) -> CapturedWindow {
+        replacing(title: title, creationTime: creationTime)
+    }
+
+    func replacingTitle(_ title: String) -> CapturedWindow {
+        replacing(title: title, creationTime: creationTime)
+    }
+
+    private func replacing(title: String?, creationTime: Date) -> CapturedWindow {
         var window = CapturedWindow(
             id: id,
             title: title,
@@ -149,13 +157,11 @@ extension CapturedWindow {
             bytes[0x3A] = 0x10
             var widCopy = UInt32(wid)
             memcpy(&bytes[0x3C], &widCopy, MemoryLayout<UInt32>.size)
-            // Click just outside the frame: makes the window key without hit-testing content
-            // (top-left would close Chrome/Brave PWA shims).
-            var clickPoint = CGPoint(x: -1, y: -1)
+            // Mouse-down only, far off the frame: makes the window key without clicking content
+            // or its resize grab region (two quick down/up pairs there resize like a corner double-click).
+            var clickPoint = CGPoint(x: 300_000, y: 300_000)
             memcpy(&bytes[0x20], &clickPoint, MemoryLayout<CGPoint>.size)
             bytes[0x08] = 0x01
-            _ = SLPSPostEventRecordTo(&psn, &bytes)
-            bytes[0x08] = 0x02
             _ = SLPSPostEventRecordTo(&psn, &bytes)
 
             try axEl.performAction(kAXRaiseAction)

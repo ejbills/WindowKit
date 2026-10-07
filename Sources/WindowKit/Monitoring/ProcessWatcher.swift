@@ -19,7 +19,9 @@ public final class ProcessWatcher {
     private var pendingPolicyObservations: [pid_t: PolicyObservation] = [:]
     private var pendingFinishObservations: [pid_t: PolicyObservation] = [:]
     private var pidsByIdentity: [ObjectIdentifier: (app: NSRunningApplication, pid: pid_t)] = [:]
-    private let retirementQueue = DispatchQueue(label: "com.windowkit.process-observation-retirement", qos: .utility)
+    private var retiredObservations: [PolicyObservation] = []
+    private var retirementDrain: DispatchWorkItem?
+    private var retirementDeadline: DispatchTime?
     private let activationQueue = DispatchQueue(label: "com.windowkit.activation-policy", qos: .userInitiated)
     private var deliveredPIDs: [ObjectIdentifier: (app: NSRunningApplication, pid: pid_t)] = [:]
     private var deliveredOrder: [ObjectIdentifier] = []
@@ -43,11 +45,17 @@ public final class ProcessWatcher {
     /// Backstop for a launching app whose `isFinishedLaunching` never flips.
     private static let launchFinishTimeout: TimeInterval = 30
 
+    /// Quiet period after the last launch or exit before retired observations are invalidated.
+    private static let retirementQuietPeriod: TimeInterval = 1.5
+
+    /// Longest a retired observation waits while launches and exits keep arriving.
+    private static let retirementMaxDelay: TimeInterval = 10
+
     public private(set) var frontmostApplication: NSRunningApplication?
 
     public init() {
         self.events = eventSubject.eraseToAnyPublisher()
-        frontmostApplication = NSWorkspace.shared.frontmostApplication
+        frontmostApplication = NSWorkspace.shared.frontmostApplication.map { RunningApplicationResolver.resolving($0) }
         setupObservers()
     }
 
@@ -68,16 +76,31 @@ public final class ProcessWatcher {
         pendingPolicyObservations.removeAll()
         pendingFinishObservations.values.forEach { $0.invalidate() }
         pendingFinishObservations.removeAll()
+        retirementDrain?.cancel()
+        drainRetiredObservations()
         pidsByIdentity.removeAll()
     }
 
-    /// Invalidates observations on `retirementQueue`: each removal is a synchronous LaunchServices
-    /// round-trip. Registration must stay on main, where LaunchServices schedules the notification.
+    /// Invalidates on main, where AppKit's observer bookkeeping lives, once launches and exits have been
+    /// quiet for `retirementQuietPeriod`: each removal is a LaunchServices round-trip that stalls during exits.
     private func retire(_ observations: [PolicyObservation]) {
-        guard !observations.isEmpty else { return }
-        retirementQueue.async {
-            observations.forEach { $0.invalidate() }
-        }
+        retiredObservations.append(contentsOf: observations)
+        guard !retiredObservations.isEmpty else { return }
+        let now = DispatchTime.now()
+        let deadline = retirementDeadline ?? now + Self.retirementMaxDelay
+        retirementDeadline = deadline
+        retirementDrain?.cancel()
+        let drain = DispatchWorkItem { [weak self] in self?.drainRetiredObservations() }
+        retirementDrain = drain
+        DispatchQueue.main.asyncAfter(deadline: min(now + Self.retirementQuietPeriod, deadline), execute: drain)
+    }
+
+    private func drainRetiredObservations() {
+        let retired = retiredObservations
+        retiredObservations.removeAll()
+        retirementDrain = nil
+        retirementDeadline = nil
+        retired.forEach { $0.invalidate() }
     }
 
     /// Reads `app.activationPolicy` on `activationQueue` and, for a `.regular` app, runs `deliver`
@@ -89,6 +112,7 @@ public final class ProcessWatcher {
     ) {
         activationQueue.async { [weak self] in
             guard app.activationPolicy == .regular else { return }
+            let app = RunningApplicationResolver.resolving(app)
             let pid = app.processIdentifier
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -115,24 +139,12 @@ public final class ProcessWatcher {
     }
 
     public func runningApplications() -> [NSRunningApplication] {
-        NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }
+        RunningApplicationResolver.resolving(NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular })
     }
-
-    /// Non-regular agents whose launch and termination are reported like
-    /// regular apps (see `FloatingAgentWatcher`).
-    var floatingAgentBundleIDs: Set<String> = []
 
     /// Whether a PID is tracked, so its exit is reported even when it was never marked
     /// launched (it turned `.regular` after its policy-flip window expired).
     var isTrackedPID: ((pid_t) -> Bool)?
-
-    func runningFloatingAgents() -> [NSRunningApplication] {
-        NSWorkspace.shared.runningApplications.filter(isFloatingAgent)
-    }
-
-    func isFloatingAgent(_ app: NSRunningApplication) -> Bool {
-        !floatingAgentBundleIDs.isEmpty && app.bundleIdentifier.map(floatingAgentBundleIDs.contains) == true
-    }
 
     /// Event-driven backstop for apps the NSWorkspace notifications miss.
     /// Processes spawned by exec'ing an app binary directly (Bambu Studio project
@@ -153,14 +165,15 @@ public final class ProcessWatcher {
                 continue
             }
 
-            let pid = app.processIdentifier
+            let resolved = RunningApplicationResolver.resolving(app)
+            let pid = resolved.processIdentifier
             pidsByIdentity[identity] = (app, pid)
             currentPIDs.insert(pid)
             guard !knownPIDs.contains(pid) else { continue }
-            if app.activationPolicy == .regular || isFloatingAgent(app) {
-                markLaunched(app)
+            if app.activationPolicy == .regular {
+                markLaunched(resolved)
             } else if pendingPolicyObservations[pid] == nil {
-                observePolicyFlip(of: app)
+                observePolicyFlip(of: resolved)
             }
         }
 
@@ -207,7 +220,7 @@ public final class ProcessWatcher {
         }
 
         eventSubject.send(.applicationWillLaunch(app))
-        let token = app.observe(\.isFinishedLaunching) { [weak self] app, _ in
+        let token = RunningApplicationResolver.observationTarget(app).observe(\.isFinishedLaunching) { [weak self] _, _ in
             DispatchQueue.main.async {
                 guard let self, app.isFinishedLaunching, !app.isTerminated else { return }
                 guard let pending = self.pendingFinishObservations.removeValue(forKey: pid) else { return }
@@ -227,7 +240,7 @@ public final class ProcessWatcher {
 
     private func observePolicyFlip(of app: NSRunningApplication) {
         let pid = app.processIdentifier
-        let token = app.observe(\.activationPolicy) { [weak self] app, _ in
+        let token = RunningApplicationResolver.observationTarget(app).observe(\.activationPolicy) { [weak self] _, _ in
             DispatchQueue.main.async {
                 guard let self, app.activationPolicy == .regular, !app.isTerminated else { return }
                 self.markLaunched(app)
