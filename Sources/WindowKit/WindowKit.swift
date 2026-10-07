@@ -344,15 +344,22 @@ public final class WindowKit {
     /// started outside WindowKit (yellow button, Cmd+M, a title-bar double-click) are announced when the
     /// native Dock adds their tile, ~30ms before its animation shows. Minimizes WindowKit performs are
     /// announced before they start and run with the owner app hidden, so the Dock plays no animation for
-    /// them. Restores WindowKit performs are announced `restoreLeadTime` before the native restore starts.
-    /// Requires `tracksMinimizeTransitions`.
+    /// them (see `MinimizeTransition` for when hiding fails). Restores WindowKit performs are announced
+    /// `coverLeadTime` before the native restore starts. Requires `tracksMinimizeTransitions`.
     public var minimizeTransitions: AnyPublisher<MinimizeTransition, Never> {
         minimizeTransitionSubject.eraseToAnyPublisher()
     }
 
-    /// How long a restore WindowKit performs waits after being announced before it starts, so a host can
-    /// cover the native animation first.
-    @ObservationIgnored public var restoreLeadTime: TimeInterval = 0
+    /// How long a transition WindowKit performs with the native animation (a restore, or a minimize whose
+    /// owner couldn't be hidden) waits after being announced before it starts, so a host can cover the
+    /// native animation first.
+    @ObservationIgnored public var coverLeadTime: TimeInterval = 0
+
+    /// Asked on the main thread, with the window as cached, before WindowKit announces a minimize or restore
+    /// it performs. Returning false runs that action as usual: no announcement, no capture, no hidden owner
+    /// and no `coverLeadTime` wait (a minimize is then announced from its Dock tile like any other). Lets a
+    /// host decline windows it won't animate. Nil announces every eligible window.
+    @ObservationIgnored public var shouldAnnounceOwnTransition: (@MainActor (CapturedWindow, MinimizeTransition.Kind) -> Bool)?
 
     /// Opt-in toggle for `minimizeTransitions` and for running WindowKit's own minimizes
     /// with the owner app hidden (default `false`).
@@ -419,14 +426,15 @@ public final class WindowKit {
     }
 
     private let tracker: WindowTracker
-    private let orphanedWindowTracker = OrphanedWindowTracker()
-    private let dockHandoffTracker = DockHandoffTracker()
+    private let orphanedWindowTracker: OrphanedWindowTracker
+    private let dockHandoffTracker: DockHandoffTracker
     private let appSwitcherObserver = AppSwitcherObserver()
-    private let minimizeTransitionTracker = MinimizeTransitionTracker()
+    private let minimizeTransitionTracker: MinimizeTransitionTracker
     @ObservationIgnored private let minimizeTransitionSubject = PassthroughSubject<MinimizeTransition, Never>()
-    /// Windows WindowKit is minimizing itself, with when the minimize was announced. Their Dock
-    /// tile is expected and is not announced again.
+    /// Windows WindowKit is minimizing itself, with when their minimize settled (`distantFuture` until
+    /// then). Their Dock tile is expected and is not announced again.
     @ObservationIgnored private var ownMinimizes: [CGWindowID: Date] = [:]
+    @ObservationIgnored private var ownTransitionsInFlight: Set<CGWindowID> = []
     /// Windows recently matched to a Dock item, so a burst of same-titled items (Minimize
     /// All) maps to distinct windows.
     @ObservationIgnored private var matchedMinimizeStarts: [CGWindowID: Date] = [:]
@@ -457,6 +465,10 @@ public final class WindowKit {
 
     private init() {
         self.tracker = WindowTracker()
+        let dockObserver = DockAXObserver(runLoopMode: .commonModes)
+        self.orphanedWindowTracker = OrphanedWindowTracker(dockObserver: dockObserver)
+        self.dockHandoffTracker = DockHandoffTracker(dockObserver: dockObserver)
+        self.minimizeTransitionTracker = MinimizeTransitionTracker(dockObserver: dockObserver)
         self.frontmostApplication = tracker.frontmostApplication
         orphanedWindowTracker.isExcluded = { [repository = tracker.repository] pid in
             repository.isExcludedOrIgnored(pid)
@@ -800,28 +812,69 @@ public final class WindowKit {
     /// Minimizes the window, updating the cache immediately rather than waiting
     /// on AX notifications (unreliable under Stage Manager).
     public func minimizeWindow(_ window: CapturedWindow) async throws {
-        if let announced = await announceOwnTransition(.minimize, of: window) {
-            if try await tracker.minimizeWindowHidingOwner(announced, reactivate: isFrontmost(announced.ownerPID)) { return }
-            Logger.warning("Hidden minimize didn't land; minimizing normally", details: "wid=\(announced.id)")
+        guard tracksMinimizeTransitions else { return try await tracker.minimizeWindow(window) }
+        let claimed = claimOwnTransitions([window])
+        defer { releaseOwnTransitions(claimed) }
+        for target in await minimizeHidingOwners(claimed) {
+            try await tracker.minimizeWindow(target)
         }
-        try await tracker.minimizeWindow(window)
+    }
+
+    /// Minimizes the windows in order, updating the cache immediately. While transitions are tracked, every
+    /// window is announced first and each owner app is hidden once for all of its windows; otherwise this is
+    /// `minimizeWindow` for each. A window that fails is skipped.
+    public func minimizeWindows(_ windows: [CapturedWindow]) async {
+        guard tracksMinimizeTransitions else {
+            for window in windows {
+                try? await tracker.minimizeWindow(window)
+            }
+            return
+        }
+        let claimed = claimOwnTransitions(windows)
+        defer { releaseOwnTransitions(claimed) }
+        for target in await minimizeHidingOwners(claimed) {
+            try? await tracker.minimizeWindow(target)
+        }
     }
 
     /// Restores the window, updating the cache immediately.
     public func restoreWindow(_ window: CapturedWindow) async throws {
-        await announceOwnTransition(.restore, of: window)
-        try await tracker.restoreWindow(window)
+        guard tracksMinimizeTransitions else { return try await tracker.restoreWindow(window) }
+        let claimed = claimOwnTransitions([window])
+        defer { releaseOwnTransitions(claimed) }
+        for target in await announceRestores(claimed) {
+            try await tracker.restoreWindow(target)
+        }
+    }
+
+    /// Restores the windows in order, updating the cache immediately. While transitions are tracked, every
+    /// window is announced first and they wait `coverLeadTime` once; otherwise this is `restoreWindow` for
+    /// each. A window that fails is skipped.
+    public func restoreWindows(_ windows: [CapturedWindow]) async {
+        guard tracksMinimizeTransitions else {
+            for window in windows {
+                try? await tracker.restoreWindow(window)
+            }
+            return
+        }
+        let claimed = claimOwnTransitions(windows)
+        defer { releaseOwnTransitions(claimed) }
+        for target in await announceRestores(claimed) {
+            try? await tracker.restoreWindow(target)
+        }
     }
 
     /// Toggles the window's minimized state, updating the cache immediately.
     @discardableResult
     public func toggleMinimizeWindow(_ window: CapturedWindow) async throws -> Bool {
         guard tracksMinimizeTransitions else { return try await tracker.toggleMinimizeWindow(window) }
-        if cachedWindow(window).isMinimized {
-            try await restoreWindow(window)
+        let current = cachedWindow(window)
+        guard !ownTransitionsInFlight.contains(current.id) else { return current.isMinimized }
+        if current.isMinimized {
+            try await restoreWindow(current)
             return false
         }
-        try await minimizeWindow(window)
+        try await minimizeWindow(current)
         return true
     }
 
@@ -829,8 +882,12 @@ public final class WindowKit {
     /// in the cache immediately.
     public func focusWindow(_ window: CapturedWindow) async throws {
         focusRequests.send(window.id)
-        await announceOwnTransition(.restore, of: window)
-        try await tracker.focusWindow(window)
+        guard tracksMinimizeTransitions else { return try await tracker.focusWindow(window) }
+        let claimed = claimOwnTransitions([window])
+        defer { releaseOwnTransitions(claimed) }
+        for target in await announceRestores(claimed) {
+            try await tracker.focusWindow(target)
+        }
     }
 
     // MARK: Minimize transitions
@@ -841,66 +898,168 @@ public final class WindowKit {
         tracker.repository.readCache(windowID: window.id) ?? window
     }
 
-    private func isFrontmost(_ pid: pid_t) -> Bool {
-        frontmostApplication.flatMap(processIdentifier(of:)) == pid
-    }
-
-    /// While transitions are tracked, announces a minimize or restore WindowKit is about to perform,
-    /// with a one-off full-resolution capture, and returns the window to perform it on. A minimize then
-    /// runs with the owner hidden; a restore can't (the Dock replays the genie-out of a window it
-    /// minimized even while the owner is hidden), so it returns after `restoreLeadTime` for the host to
-    /// cover the native animation. Nil when the action should run as usual.
-    @discardableResult
-    private func announceOwnTransition(_ kind: MinimizeTransition.Kind, of window: CapturedWindow) async -> CapturedWindow? {
-        guard tracksMinimizeTransitions else { return nil }
-        let current = cachedWindow(window)
-        guard current.isMinimized == (kind == .restore),
-              !tracker.repository.isExcludedOrIgnored(current.ownerPID)
-        else { return nil }
-        let image = await Self.transitionImage(of: current.id)
-        if kind == .minimize { ownMinimizes[current.id] = Date() }
-        minimizeTransitionSubject.send(MinimizeTransition(kind: kind, window: current, image: image, showsNativeAnimation: kind == .restore))
-        if kind == .restore, restoreLeadTime > 0 {
-            try? await Task.sleep(nanoseconds: UInt64(restoreLeadTime * 1_000_000_000))
+    /// Claims the windows for one of WindowKit's own transitions, dropping repeats and windows already in one.
+    private func claimOwnTransitions(_ windows: [CapturedWindow]) -> [CapturedWindow] {
+        windows.filter { window in
+            guard ownTransitionsInFlight.insert(window.id).inserted else {
+                Logger.debug("Skipped a window already in a transition", details: "wid=\(window.id)")
+                return false
+            }
+            return true
         }
-        return current
     }
 
-    /// The window's contents at full backing resolution, outside the preview cache and its quality
-    /// settings. A minimized window captures as it looked before it minimized.
-    private static func transitionImage(of windowID: CGWindowID) async -> CGImage? {
-        let service = {
-            var service = ScreenshotService()
-            service.captureQuality = .best
-            return service
-        }()
-        return try? await CapturedWindow.offMain { try service.captureWindow(id: windowID) }
+    private func releaseOwnTransitions(_ windows: [CapturedWindow]) {
+        for window in windows {
+            ownTransitionsInFlight.remove(window.id)
+        }
     }
 
-    /// Resolves the title of a Dock item that just appeared to the window being minimized: an
-    /// unminimized cached window with that title (or, failing that, a fuzzy match), the frontmost
-    /// app's first, then the most recently used. Never asks the owner app, whose main thread is busy
-    /// in the minimize.
-    private func minimizeStarted(title: String) {
-        let now = Date()
+    /// Whether WindowKit announces its own `kind` of `window`, as cached, for the host to animate.
+    private func announces(_ kind: MinimizeTransition.Kind, of window: CapturedWindow) -> Bool {
+        window.isMinimized == (kind == .restore)
+            && !window.isFullscreen
+            && !window.isOwnerHidden
+            && !tracker.repository.isExcludedOrIgnored(window.ownerPID)
+            && shouldAnnounceOwnTransition?(window, kind) != false
+    }
+
+    /// Announces the windows' minimizes the host takes, each with a one-off full-resolution capture, and runs
+    /// them with each owner app hidden once. Returns, in order, the windows still to minimize normally: those
+    /// not announced, and those that didn't land, announced again with the native animation `coverLeadTime` earlier.
+    private func minimizeHidingOwners(_ windows: [CapturedWindow]) async -> [CapturedWindow] {
+        let candidates = windows.map(cachedWindow).filter { announces(.minimize, of: $0) }
+        guard !candidates.isEmpty else { return windows }
+        let images = await Self.transitionImages(of: candidates.map(\.id))
+        let announced = candidates.filter { images[$0.id] != nil }
+        guard !announced.isEmpty else { return windows }
+
+        pruneMinimizeStartMatches(now: Date())
+        let frontPID = frontmostApplication.flatMap(processIdentifier(of:))
+        for window in announced {
+            ownMinimizes[window.id] = .distantFuture
+            minimizeTransitionSubject.send(MinimizeTransition(
+                kind: .minimize, window: window, image: images[window.id],
+                showsNativeAnimation: false, isPerformedByWindowKit: true
+            ))
+        }
+        var landed = Set<CGWindowID>()
+        for group in Self.groupedByOwner(announced) {
+            landed.formUnion(await tracker.minimizeWindowsHidingOwner(group, reactivate: group[0].ownerPID == frontPID))
+        }
+
+        let settled = Date()
+        let fallbacks = announced.filter { !landed.contains($0.id) }
+        for window in announced where ownMinimizes[window.id] != nil || !landed.contains(window.id) {
+            ownMinimizes[window.id] = settled
+        }
+        for window in fallbacks {
+            Logger.warning("Hidden minimize didn't land; minimizing normally", details: "wid=\(window.id)")
+            minimizeTransitionSubject.send(MinimizeTransition(
+                kind: .minimize, window: window, image: images[window.id],
+                showsNativeAnimation: true, isPerformedByWindowKit: true
+            ))
+        }
+        if !fallbacks.isEmpty {
+            await waitForCover()
+        }
+        let announcedByID = Dictionary(announced.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return windows.compactMap { window in
+            guard let announcedWindow = announcedByID[window.id] else { return window }
+            return landed.contains(window.id) ? nil : announcedWindow
+        }
+    }
+
+    /// Announces the windows' restores the host takes, each with a one-off full-resolution capture, and waits
+    /// `coverLeadTime` once if there were any. Returns the windows to restore, announced ones as cached. Hiding
+    /// the owner doesn't help a restore: the Dock replays the genie-out of a window it minimized even then.
+    private func announceRestores(_ windows: [CapturedWindow]) async -> [CapturedWindow] {
+        let announced = windows.map(cachedWindow).filter { announces(.restore, of: $0) }
+        guard !announced.isEmpty else { return windows }
+        let images = await Self.transitionImages(of: announced.map(\.id))
+        for window in announced {
+            minimizeTransitionSubject.send(MinimizeTransition(
+                kind: .restore, window: window, image: images[window.id],
+                showsNativeAnimation: true, isPerformedByWindowKit: true
+            ))
+        }
+        await waitForCover()
+        let announcedByID = Dictionary(announced.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return windows.map { announcedByID[$0.id] ?? $0 }
+    }
+
+    private func waitForCover() async {
+        guard coverLeadTime > 0 else { return }
+        try? await Task.sleep(nanoseconds: UInt64(coverLeadTime * 1_000_000_000))
+    }
+
+    private static func groupedByOwner(_ windows: [CapturedWindow]) -> [[CapturedWindow]] {
+        var groups: [[CapturedWindow]] = []
+        var groupIndex: [pid_t: Int] = [:]
+        for window in windows {
+            if let index = groupIndex[window.ownerPID] {
+                groups[index].append(window)
+            } else {
+                groupIndex[window.ownerPID] = groups.count
+                groups.append([window])
+            }
+        }
+        return groups
+    }
+
+    /// The windows' contents at full backing resolution, outside the preview cache and its quality settings,
+    /// captured concurrently away from the AX queue. A minimized window captures as it looked before it minimized.
+    private static func transitionImages(of windowIDs: [CGWindowID]) async -> [CGWindowID: CGImage] {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let service = ScreenshotService(captureQuality: .best)
+                let lock = NSLock()
+                var images: [CGWindowID: CGImage] = [:]
+                DispatchQueue.concurrentPerform(iterations: windowIDs.count) { index in
+                    guard let image = try? service.captureWindow(id: windowIDs[index]) else { return }
+                    lock.withLock { images[windowIDs[index]] = image }
+                }
+                continuation.resume(returning: images)
+            }
+        }
+    }
+
+    private func pruneMinimizeStartMatches(now: Date) {
         ownMinimizes = ownMinimizes.filter { now.timeIntervalSince($0.value) < Self.minimizeStartMatchWindow }
         matchedMinimizeStarts = matchedMinimizeStarts.filter { now.timeIntervalSince($0.value) < Self.minimizeStartMatchWindow }
-        let unmatched = tracker.repository.readAllCache().filter { !$0.isMinimized && matchedMinimizeStarts[$0.id] == nil }
-        let exact = unmatched.filter { ($0.title ?? "") == title }
-        let candidates = exact.isEmpty
-            ? unmatched.filter { WindowEnumerator.isFuzzyTitleMatch($0.title ?? "", title) }
-            : exact
+    }
+
+    /// Resolves the title of a Dock item that just appeared to the window being minimized, among cached windows
+    /// with that title (or fuzzy matches when none has it). A window WindowKit is minimizing itself swallows the
+    /// item. Otherwise an unminimized match is announced, the frontmost app's first, then the most recently used;
+    /// nothing is when every match is already minimized (an item re-created for an old minimize). Never asks the
+    /// owner app, whose main thread is busy in the minimize.
+    private func minimizeStarted(title: String) {
+        let now = Date()
+        pruneMinimizeStartMatches(now: now)
+        let cached = tracker.repository.readAllCache()
+        let exact = cached.filter { ($0.title ?? "") == title }
+        let titled = exact.isEmpty ? cached.filter { WindowEnumerator.isFuzzyTitleMatch($0.title ?? "", title) } : exact
+        if let own = titled.first(where: { ownMinimizes[$0.id] != nil }) {
+            ownMinimizes.removeValue(forKey: own.id)
+            matchedMinimizeStarts[own.id] = now
+            return
+        }
         let frontPID = frontmostApplication.flatMap(processIdentifier(of:))
         let rank = { (window: CapturedWindow) in (window.ownerPID == frontPID ? 1 : 0, window.lastInteractionTime) }
-        guard let window = candidates.first(where: { ownMinimizes[$0.id] != nil })
-            ?? candidates.max(by: { rank($0) < rank($1) })
-        else {
-            Logger.debug("Minimize start matched no cached window", details: "title=\(title)")
+        let candidates = titled.filter { !$0.isMinimized && matchedMinimizeStarts[$0.id] == nil }
+        guard let window = candidates.max(by: { rank($0) < rank($1) }) else {
+            Logger.debug(
+                titled.isEmpty ? "Minimize start matched no cached window" : "Minimize start matched no window still to minimize",
+                details: "title=\(title)"
+            )
             return
         }
         matchedMinimizeStarts[window.id] = now
-        guard ownMinimizes.removeValue(forKey: window.id) == nil else { return }
-        minimizeTransitionSubject.send(MinimizeTransition(kind: .minimize, window: window, image: nil, showsNativeAnimation: true))
+        minimizeTransitionSubject.send(MinimizeTransition(
+            kind: .minimize, window: window, image: nil,
+            showsNativeAnimation: true, isPerformedByWindowKit: false
+        ))
     }
 
     /// Hides the window's owner application, marking all its cached windows hidden.

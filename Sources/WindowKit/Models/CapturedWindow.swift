@@ -230,52 +230,88 @@ extension CapturedWindow {
         isMinimized = false
     }
 
-    /// Minimizes the window while its owner app is hidden, so the Dock has nothing on screen to animate.
-    /// The app's other windows leave the screen for the ~50-100ms this takes, and a frontmost owner is
-    /// activated again afterwards (hiding hands focus to another app). Returns whether the minimize landed.
-    mutating func minimizeHidingOwner(reactivate: Bool) async throws -> Bool {
-        guard !isMinimized else { return true }
-        let axEl = axElement
-        let appAx = appAxElement
-        let pid = ownerPID
-        let landed = try await Self.offMain {
-            let landed = try Self.whileOwnerHidden(appAx) {
-                try axEl.setAttribute(kAXMinimizedAttribute, value: true)
-                return Self.waitUntil { (try? axEl.isMinimized()) == true }
+    private static let ownerHideMessagingTimeout: Float = 0.25
+    private static let ownerHideTimeout: TimeInterval = 0.4
+    private static let ownerHideMinimizeTimeoutPerWindow: TimeInterval = 0.1
+    private static let ownerHideMinimizeTimeoutLimit: TimeInterval = 1.5
+
+    /// Minimizes the windows, all owned by `pid`, while the owner app is hidden so the Dock has nothing on
+    /// screen to animate, and returns the ids of those now minimized. Each AX call uses a short messaging
+    /// timeout, the unhide is confirmed, and a frontmost owner is activated again whenever it was hidden.
+    /// Blocks for the ~50-100ms the app's windows are off screen; call off the main thread.
+    static func minimizeHidingOwner(pid: pid_t, windows: [(id: CGWindowID, element: AXUIElement)], reactivate: Bool) -> Set<CGWindowID> {
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, ownerHideMessagingTimeout)
+        var minimized = Set<CGWindowID>()
+        var pending: [(id: CGWindowID, element: AXUIElement)] = []
+        for window in boundedElements(of: windows, in: app) {
+            if (try? window.element.isMinimized()) == true {
+                minimized.insert(window.id)
+            } else if (try? window.element.isFullscreen()) != true {
+                pending.append(window)
             }
-            if landed, reactivate {
-                _ = RunningApplicationResolver.application(forProcessIdentifier: pid)?.activate()
-            }
-            return landed
         }
-        if landed { isMinimized = true }
-        return landed
+        guard !pending.isEmpty else { return minimized }
+
+        let hidesOwner = (try? app.attribute(kAXHiddenAttribute, as: Bool.self)) != true
+        if hidesOwner {
+            try? app.setAttribute(kAXHiddenAttribute, value: true)
+            guard ConcurrencyHelpers.poll(timeout: ownerHideTimeout, { (try? app.attribute(kAXHiddenAttribute, as: Bool.self)) == true }) else {
+                revealOwner(app, pid: pid, reactivate: reactivate)
+                return minimized
+            }
+        }
+        for window in pending {
+            try? window.element.setAttribute(kAXMinimizedAttribute, value: true)
+        }
+        let timeout = min(ownerHideTimeout + ownerHideMinimizeTimeoutPerWindow * Double(pending.count - 1), ownerHideMinimizeTimeoutLimit)
+        _ = ConcurrencyHelpers.poll(timeout: timeout) {
+            pending.removeAll { window in
+                guard (try? window.element.isMinimized()) == true else { return false }
+                minimized.insert(window.id)
+                return true
+            }
+            return pending.isEmpty
+        }
+        if hidesOwner {
+            revealOwner(app, pid: pid, reactivate: reactivate)
+        }
+        for window in pending where (try? window.element.isMinimized()) == true {
+            minimized.insert(window.id)
+        }
+        return minimized
     }
 
-    /// Hides the owner app over AX, runs `work` once it is hidden, then unhides it. The app drops an AX
-    /// request it hasn't acted on when it unhides, so `work` waits for its own result before returning.
-    private static func whileOwnerHidden(_ appAx: AXUIElement, _ work: () throws -> Bool) throws -> Bool {
-        let wasHidden = (try? appAx.attribute(kAXHiddenAttribute, as: Bool.self)) == true
-        if !wasHidden {
-            try appAx.setAttribute(kAXHiddenAttribute, value: true)
-            guard waitUntil({ (try? appAx.attribute(kAXHiddenAttribute, as: Bool.self)) == true }) else {
-                try? appAx.setAttribute(kAXHiddenAttribute, value: false)
-                return false
-            }
+    /// The windows' elements as listed by `app`, which carries a short messaging timeout, so a busy owner can't
+    /// hold one read for the global timeout. A window the list misses keeps its shared element.
+    private static func boundedElements(
+        of windows: [(id: CGWindowID, element: AXUIElement)],
+        in app: AXUIElement
+    ) -> [(id: CGWindowID, element: AXUIElement)] {
+        let listed = (try? app.windows()) ?? []
+        return windows.map { window in
+            guard let element = listed.first(where: { CFEqual($0, window.element) }) else { return window }
+            AXUIElementSetMessagingTimeout(element, ownerHideMessagingTimeout)
+            return (window.id, element)
         }
-        defer {
-            if !wasHidden { try? appAx.setAttribute(kAXHiddenAttribute, value: false) }
-        }
-        return try work()
     }
 
-    private static func waitUntil(timeout: TimeInterval = 0.4, _ condition: () -> Bool) -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        repeat {
-            if condition() { return true }
-            usleep(2000)
-        } while Date() < deadline
-        return false
+    /// Unhides the owner over AX and confirms it, unhiding through LaunchServices when the app doesn't answer,
+    /// then activates it again if it was frontmost (hiding hands focus to another app).
+    private static func revealOwner(_ app: AXUIElement, pid: pid_t, reactivate: Bool) {
+        try? app.setAttribute(kAXHiddenAttribute, value: false)
+        let revealed = ConcurrencyHelpers.poll(timeout: ownerHideTimeout) {
+            (try? app.attribute(kAXHiddenAttribute, as: Bool.self)) == false
+        }
+        guard !revealed || reactivate else { return }
+        let application = RunningApplicationResolver.application(forProcessIdentifier: pid)
+        if !revealed {
+            Logger.warning("Owner didn't unhide over AX; unhiding through LaunchServices", details: "pid=\(pid)")
+            _ = application?.unhide()
+        }
+        if reactivate {
+            _ = application?.activate()
+        }
     }
 
     @discardableResult

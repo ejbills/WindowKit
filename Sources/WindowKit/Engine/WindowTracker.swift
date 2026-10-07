@@ -44,6 +44,8 @@ public final class WindowTracker {
     private let pendingOperations = OSAllocatedUnfairLock(initialState: [String: [() async -> Void]]())
     private let inFlightTracks = OSAllocatedUnfairLock(initialState: [pid_t: Task<[CapturedWindow], Never>]())
     private let destroyBurstState = OSAllocatedUnfairLock(initialState: [pid_t: DestroyBurstState]())
+    private let ownerHides = OSAllocatedUnfairLock(initialState: [pid_t: (count: Int, until: TimeInterval)]())
+    private static let ownerHideSlack: TimeInterval = 0.5
     private let axQueue = DispatchQueue(label: "com.windowkit.ax", qos: .userInitiated)
     private var notificationCenterWatcher: AccessibilityWatcher?
     private let notificationCenterWatcherQueue = DispatchQueue(label: "com.windowkit.notificationcenter-watcher", qos: .utility)
@@ -464,14 +466,73 @@ public final class WindowTracker {
         return minimized
     }
 
-    /// Minimizes the window with its owner app hidden, so the Dock plays no animation, and reflects it in
-    /// the cache. Returns whether the minimize landed; the window is left as it was otherwise.
-    func minimizeWindowHidingOwner(_ window: CapturedWindow, reactivate: Bool) async throws -> Bool {
-        guard !repository.isExcludedOrIgnored(window.ownerPID) else { return true }
-        var target = window
-        guard try await target.minimizeHidingOwner(reactivate: reactivate) else { return false }
-        applyCachedWindowState(windowID: window.id, pid: window.ownerPID) { $0.isMinimized = true }
-        return true
+    /// Minimizes the windows, all owned by one app, with that app hidden so the Dock plays no animation, and
+    /// reflects those that landed in the cache. The app's own hidden and shown notifications are ignored
+    /// meanwhile, so its windows never read as hidden. Returns the ids that landed; the rest are left as they were.
+    func minimizeWindowsHidingOwner(_ windows: [CapturedWindow], reactivate: Bool) async -> Set<CGWindowID> {
+        guard let pid = windows.first?.ownerPID, !repository.isExcludedOrIgnored(pid) else { return [] }
+        let targets = windows.map { (id: $0.id, element: $0.axElement) }
+        beginOwnerHide(pid: pid)
+        let landed = (try? await CapturedWindow.offMain {
+            CapturedWindow.minimizeHidingOwner(pid: pid, windows: targets, reactivate: reactivate)
+        }) ?? []
+        endOwnerHide(pid: pid)
+        guard !landed.isEmpty else { return landed }
+        let changes = repository.modify(forPID: pid) { cached in
+            cached = Set(cached.map { window in
+                guard landed.contains(window.id) else { return window }
+                var updated = window
+                updated.isMinimized = true
+                return updated
+            })
+        }
+        emitChanges(changes)
+        return landed
+    }
+
+    private func beginOwnerHide(pid: pid_t) {
+        ownerHides.withLockUnchecked { hides in
+            hides[pid, default: (count: 0, until: 0)].count += 1
+        }
+    }
+
+    /// Keeps ignoring the app's hidden and shown notifications for `ownerHideSlack`, long enough for those of
+    /// the unhide to arrive, then reconciles the cache with the app's live hidden state.
+    private func endOwnerHide(pid: pid_t) {
+        let isLast = ownerHides.withLockUnchecked { hides -> Bool in
+            guard var hide = hides[pid] else { return false }
+            hide.count -= 1
+            hide.until = ProcessInfo.processInfo.systemUptime + Self.ownerHideSlack
+            hides[pid] = hide
+            return hide.count == 0
+        }
+        guard isLast else { return }
+        axQueue.asyncAfter(deadline: .now() + Self.ownerHideSlack) { [weak self] in
+            guard let self else { return }
+            let ended = ownerHides.withLockUnchecked { hides -> Bool in
+                guard let hide = hides[pid], hide.count == 0,
+                      hide.until <= ProcessInfo.processInfo.systemUptime else { return false }
+                hides.removeValue(forKey: pid)
+                return true
+            }
+            if ended { reconcileOwnerHidden(pid: pid) }
+        }
+    }
+
+    private func isOwnerHiddenByWindowKit(_ pid: pid_t) -> Bool {
+        ownerHides.withLockUnchecked { hides in
+            hides[pid].map { $0.count > 0 || ProcessInfo.processInfo.systemUptime < $0.until } ?? false
+        }
+    }
+
+    /// Re-reads the app's hidden state and corrects cached windows that disagree, catching a real hide or
+    /// unhide whose notification arrived while WindowKit's own were ignored.
+    private func reconcileOwnerHidden(pid: pid_t) {
+        guard !repository.isExcludedOrIgnored(pid),
+              let hidden = try? AXUIElement.application(pid: pid).attribute(kAXHiddenAttribute, as: Bool.self),
+              repository.readCache(forPID: pid).contains(where: { $0.isOwnerHidden != hidden })
+        else { return }
+        applyCachedOwnerHidden(pid: pid, hidden: hidden)
     }
 
     /// Brings the window to front and immediately reflects the unminimize/unhide
@@ -787,6 +848,8 @@ public final class WindowTracker {
         switch event {
         case .windowCreated, .windowDestroyed:
             eventSubject.send(.windowActivityDetected(pid))
+        case .applicationHidden, .applicationRevealed:
+            guard !isOwnerHiddenByWindowKit(pid) else { return }
         default:
             break
         }

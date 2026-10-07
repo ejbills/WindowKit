@@ -3,21 +3,23 @@ import ApplicationServices
 import os
 
 /// Observes the native macOS Dock's accessibility tree for item add/remove and
-/// fires `onChange` (no polling). Re-registers when the Dock process relaunches,
+/// tells its subscribers (no polling). Re-registers when the Dock process relaunches,
 /// detected by watching `NSWorkspace.runningApplications` for a Dock pid change
 /// (WindowKit's `ProcessEvent` stream can't drive this: it only emits launches
-/// for `.regular` apps, and the Dock is a UIElement process). Shared by every
-/// tracker that mirrors a class of native Dock item (`OrphanedWindowTracker`,
-/// `DockHandoffTracker`); each supplies its own coalescing and item filtering.
+/// for `.regular` apps, and the Dock is a UIElement process). One instance is
+/// shared by every tracker that mirrors a class of native Dock item
+/// (`OrphanedWindowTracker`, `DockHandoffTracker`, `MinimizeTransitionTracker`);
+/// each supplies its own coalescing and item filtering.
 ///
-/// Lifecycle (`start`/`stop`) is driven on the main run loop; the accessibility
-/// read helpers are thread-safe and may be called from a tracker's work queue.
+/// Subscriptions are driven on the main run loop; the accessibility read helpers
+/// are thread-safe and may be called from a tracker's work queue.
 final class DockAXObserver: @unchecked Sendable {
-    /// Fired on the main run loop whenever a Dock item is created or destroyed.
-    var onChange: (() -> Void)?
-    /// Fired on the main run loop with the element of each newly created Dock item.
-    var onCreated: ((AXUIElement) -> Void)?
+    private struct Subscriber {
+        let onChange: (() -> Void)?
+        let onCreated: ((AXUIElement) -> Void)?
+    }
 
+    private var subscribers: [ObjectIdentifier: Subscriber] = [:]
     private let runLoopMode: CFRunLoopMode
     private var observer: AXObserver?
     private var dockApp: AXUIElement?
@@ -37,15 +39,36 @@ final class DockAXObserver: @unchecked Sendable {
         self.runLoopMode = runLoopMode
     }
 
-    func start() {
+    /// Calls `onChange` on the main run loop whenever a Dock item is created or destroyed (and after the Dock
+    /// relaunches), and `onCreated` with each new item's element, until `unsubscribe`. The first subscriber
+    /// starts the observer.
+    func subscribe(_ subscriber: AnyObject, onChange: (() -> Void)? = nil, onCreated: ((AXUIElement) -> Void)? = nil) {
+        let wasIdle = subscribers.isEmpty
+        subscribers[ObjectIdentifier(subscriber)] = Subscriber(onChange: onChange, onCreated: onCreated)
+        if wasIdle { start() }
+    }
+
+    /// Stops calling `subscriber`; the last one to leave stops the observer.
+    func unsubscribe(_ subscriber: AnyObject) {
+        guard subscribers.removeValue(forKey: ObjectIdentifier(subscriber)) != nil, subscribers.isEmpty else { return }
+        stop()
+    }
+
+    private func start() {
         registerDockObserver()
         observeDockPIDChanges()
     }
 
-    func stop() {
+    private func stop() {
         tearDownDockObserver()
         runningAppsObservation?.invalidate()
         runningAppsObservation = nil
+    }
+
+    private func notifyChange() {
+        for subscriber in Array(subscribers.values) {
+            subscriber.onChange?()
+        }
     }
 
     // MARK: Observer
@@ -96,9 +119,11 @@ final class DockAXObserver: @unchecked Sendable {
         guard let refcon else { return }
         let observer = Unmanaged<DockAXObserver>.fromOpaque(refcon).takeUnretainedValue()
         if notification as String == kAXCreatedNotification {
-            observer.onCreated?(element)
+            for subscriber in Array(observer.subscribers.values) {
+                subscriber.onCreated?(element)
+            }
         }
-        observer.onChange?()
+        observer.notifyChange()
     }
 
     /// The AX observer binds to a specific pid, so a Dock relaunch would leave it
@@ -124,7 +149,7 @@ final class DockAXObserver: @unchecked Sendable {
         guard current != 0, current != boundPID else { return }
         registerDockObserver()
         if boundPID == current {
-            onChange?()
+            notifyChange()
         } else if rebindRetriesRemaining > 0 {
             rebindRetriesRemaining -= 1
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in

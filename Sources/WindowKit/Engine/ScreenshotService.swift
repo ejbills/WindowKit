@@ -19,7 +19,7 @@ public enum WindowCaptureQuality: String, CaseIterable, Sendable {
 public struct ScreenshotService: Sendable {
     var headless: Bool = false
 
-    var captureQuality: WindowCaptureQuality = .nominal
+    public var captureQuality: WindowCaptureQuality = .nominal
 
     /// Integer divisor applied to captured image dimensions before returning
     /// (1 = keep capture resolution). Downscaled captures — and 1:1 deep-color
@@ -27,6 +27,10 @@ public struct ScreenshotService: Sendable {
     var downsampleFactor: Int = 1
 
     public init() {}
+
+    public init(captureQuality: WindowCaptureQuality) {
+        self.captureQuality = captureQuality
+    }
 
     public func captureWindow(id windowID: CGWindowID) throws -> CGImage {
         guard !headless, SystemPermissions.hasScreenRecording() else {

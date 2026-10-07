@@ -247,15 +247,20 @@ Requires Accessibility permission and is started/stopped alongside `beginTrackin
 
 WindowKit can announce every minimize as it begins, early enough for a host to draw its own animation, and can perform its own minimizes and restores without the native Dock animation.
 
-- **Minimizes started elsewhere** (yellow button, Cmd+M, title-bar double-click): the native Dock adds an `AXMinimizedWindowDockItem` to its accessibility tree ~30ms before its animation is visible, while the owner app's own miniaturized notification only arrives once the ~0.5s animation has finished. The item carries only the window title, so WindowKit resolves it to a cached window (the frontmost app's first, then the most recently used). These announce with `showsNativeAnimation == true`.
-- **Minimizes WindowKit performs** (`minimizeWindow`, and `toggleMinimizeWindow` on a visible window): announced with a one-off full-resolution capture before they start, then run with the owner app hidden over AX. The Dock has nothing on screen to animate, so none plays (`showsNativeAnimation == false`). The app's other windows leave the screen for ~50–100ms, and a frontmost owner is activated again afterwards.
-- **Restores WindowKit performs** (`restoreWindow`, `toggleMinimizeWindow` and `focusWindow` on a minimized window): announced with a one-off full-resolution capture, then run as usual after `restoreLeadTime` so a host can cover the native animation (`showsNativeAnimation == true`). Hiding the owner doesn't help here: the Dock replays the genie-out of any window it minimized with an animation, even while the owner is hidden.
+- **Minimizes started elsewhere** (yellow button, Cmd+M, title-bar double-click): the native Dock adds an `AXMinimizedWindowDockItem` to its accessibility tree ~30ms before its animation is visible, while the owner app's own miniaturized notification only arrives once the ~0.5s animation has finished. The item carries only the window title, so WindowKit resolves it to a cached window with that title (fuzzy matches only when no window has it exactly): the frontmost app's unminimized one first, then the most recently used. An item whose matches are all already minimized (one the Dock re-creates for an old minimize) is not announced. These announce with `showsNativeAnimation == true` and `isPerformedByWindowKit == false`.
+- **Minimizes WindowKit performs** (`minimizeWindow`, `minimizeWindows`, and `toggleMinimizeWindow` on a visible window): announced with a one-off full-resolution capture before they start, then run with the owner app hidden over AX. The Dock has nothing on screen to animate, so none plays (`showsNativeAnimation == false`). The app's other windows leave the screen for ~50–100ms, its own hidden/shown notifications are ignored meanwhile (cached windows never read as hidden), the unhide is confirmed (falling back to LaunchServices), and a frontmost owner is activated again. If the app can't be hidden or the window doesn't minimize while it is, the same window is announced **again** with `showsNativeAnimation == true` and minimized normally `coverLeadTime` later; a host already animating it should switch to covering the native animation rather than start over. The Dock tile of either attempt is never announced. A window that can't be captured is minimized normally without an announcement (its Dock tile then announces it).
+- **Restores WindowKit performs** (`restoreWindow`, `restoreWindows`, `toggleMinimizeWindow` and `focusWindow` on a minimized window): announced with a one-off full-resolution capture, then run as usual after `coverLeadTime` so a host can cover the native animation (`showsNativeAnimation == true`). Hiding the owner doesn't help here: the Dock replays the genie-out of any window it minimized with an animation, even while the owner is hidden.
+
+WindowKit only announces its own transitions for windows that aren't fullscreen, whose owner isn't hidden, and that `shouldAnnounceOwnTransition` accepts; anything else runs as it would with tracking off. While transitions are tracked, a minimize, restore, toggle or focus of a window whose own transition is still in progress is dropped. With `tracksMinimizeTransitions` off, every wrapper (including the batch ones, which then loop the single-window wrappers) behaves as it did before transitions existed.
 
 | Member | Type | Description |
 |---|---|---|
-| `minimizeTransitions` | `AnyPublisher<MinimizeTransition, Never>` | Every minimize, and every restore WindowKit performs, as it begins, on the main thread. WindowKit's own transitions carry `image`, a one-off full-resolution capture that is never cached. |
+| `minimizeTransitions` | `AnyPublisher<MinimizeTransition, Never>` | Every minimize, and every restore WindowKit performs, as it begins, on the main thread. WindowKit's own transitions carry `image`, a one-off full-resolution capture that is never cached, and `isPerformedByWindowKit == true`. |
 | `tracksMinimizeTransitions` | `Bool` | Opt-in toggle (default `false`). Flipping it live starts/stops the subsystem. |
-| `restoreLeadTime` | `TimeInterval` | How long WindowKit's own restores wait after being announced before they start (default `0`). |
+| `coverLeadTime` | `TimeInterval` | How long WindowKit's own transitions that play the native animation (restores, and minimizes whose owner couldn't be hidden) wait after being announced before they start (default `0`). |
+| `shouldAnnounceOwnTransition` | `((CapturedWindow, MinimizeTransition.Kind) -> Bool)?` | Asked on the main thread before WindowKit announces one of its own transitions. Return `false` for windows the host won't animate (another Space, no Screen Recording); they then run with no announcement, capture, hidden owner or lead-time wait. |
+| `minimizeWindows(_:)` | `async` | Minimizes several windows: all are announced first, then each owner app is hidden once for all of its windows. Failures are skipped. |
+| `restoreWindows(_:)` | `async` | Restores several windows: all are announced first and wait `coverLeadTime` once. Failures are skipped. |
 
 Requires Accessibility permission (plus Screen Recording for the announced preview). Minimizes started elsewhere are only seen with the native Dock's "Minimize windows into application icon" turned off, since that mode creates no per-window Dock item.
 
@@ -354,6 +359,22 @@ try window.fillTopHalf()
 try window.fillBottomHalf()
 try window.fill(.topLeftQuarter)
 ```
+
+### Window Stash Capture
+
+`WindowStashCapture` moves every window that matching processes create while it runs into a Space no display shows, before the owner can order them in (used to open another app's menu off screen).
+
+```swift
+let capture = try WindowStashCapture.begin { pid in pid == helperPID }
+// ... trigger the windows ...
+_ = capture.waitUntilOrderedOut(timeout: 0.5)
+if !capture.end() {
+    // A captured window was still ordered in, so the Space was left up.
+    // Call end() again later; it destroys the Space once nothing captured is ordered in.
+}
+```
+
+`end()` is safe to call any number of times, from any thread, and returns whether the Space is destroyed.
 
 ### Badge Polling
 

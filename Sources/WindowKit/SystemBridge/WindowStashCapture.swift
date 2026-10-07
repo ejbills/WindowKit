@@ -14,6 +14,7 @@ public final class WindowStashCapture: @unchecked Sendable {
     private let watchEnded = DispatchSemaphore(value: 0)
     private var cursor: CGWindowID
     private var isWatching = true
+    private var isSpaceDestroyed = false
     private var windows: [CGWindowID] = []
     private var matchByPID: [pid_t: Bool] = [:]
 
@@ -49,21 +50,24 @@ public final class WindowStashCapture: @unchecked Sendable {
 
     /// Waits until no captured window is ordered in. False if one still is at the deadline.
     public func waitUntilOrderedOut(timeout: TimeInterval) -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        repeat {
-            if orderedInWindowIDs.isEmpty { return true }
-            usleep(2000)
-        } while Date() < deadline
-        return false
+        ConcurrencyHelpers.poll(timeout: timeout) { orderedInWindowIDs.isEmpty }
     }
 
     /// Stops capturing and destroys the Space, unless a captured window is still ordered in. Returns whether
-    /// the Space was destroyed.
+    /// the Space is destroyed. Safe to call again, from any thread: a later call destroys a Space an earlier
+    /// one left up once no captured window is ordered in.
     public func end() -> Bool {
         lock.withLock { isWatching = false }
         watchEnded.wait()
+        watchEnded.signal()
         guard orderedInWindowIDs.isEmpty else { return false }
-        try? WindowStash.destroySpace(spaceID)
+        let destroys = lock.withLock {
+            defer { isSpaceDestroyed = true }
+            return !isSpaceDestroyed
+        }
+        if destroys {
+            try? WindowStash.destroySpace(spaceID)
+        }
         return true
     }
 

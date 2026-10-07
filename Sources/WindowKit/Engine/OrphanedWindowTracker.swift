@@ -67,9 +67,12 @@ final class OrphanedWindowTracker: @unchecked Sendable {
     private var seenCounter = 0
 
     // Shared Dock AX observer; fires `scheduleRebuild` on item add/remove.
-    private let dockObserver = DockAXObserver()
+    private let dockObserver: DockAXObserver
 
-    init() {}
+    init(dockObserver: DockAXObserver = DockAXObserver()) {
+        self.dockObserver = dockObserver
+    }
+
     deinit { stop() }
 
     // MARK: Lifecycle
@@ -78,8 +81,7 @@ final class OrphanedWindowTracker: @unchecked Sendable {
         guard !isActive.withLock({ $0 }) else { return }
         isActive.withLock { $0 = true }
         Logger.info("Starting native-dock minimized window tracking")
-        dockObserver.onChange = { [weak self] in self?.scheduleRebuild() }
-        dockObserver.start()
+        dockObserver.subscribe(self, onChange: { [weak self] in self?.scheduleRebuild() })
         scheduleRebuild()
         for delay in Self.startSettleRebuildDelays {
             queue.asyncAfter(deadline: .now() + delay) { [weak self] in
@@ -93,7 +95,7 @@ final class OrphanedWindowTracker: @unchecked Sendable {
         guard isActive.withLock({ $0 }) else { return }
         isActive.withLock { $0 = false }
         Logger.info("Stopping native-dock minimized window tracking")
-        dockObserver.stop()
+        dockObserver.unsubscribe(self)
         itemElements.withLock { $0 = [:] }
         queue.async { [weak self] in
             guard let self else { return }

@@ -3,6 +3,16 @@ import Foundation
 enum ConcurrencyHelpers {
     static let defaultTimeoutSeconds: TimeInterval = 10
 
+    /// Blocks, re-checking `condition` every 2ms until it holds or `timeout` passes. Returns whether it held.
+    static func poll(timeout: TimeInterval, _ condition: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if condition() { return true }
+            usleep(2000)
+        } while Date() < deadline
+        return false
+    }
+
     static func withTimeoutOptional<T: Sendable>(
         seconds: TimeInterval = defaultTimeoutSeconds,
         operation: @escaping @Sendable () async -> T?

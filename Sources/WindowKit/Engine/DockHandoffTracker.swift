@@ -38,9 +38,12 @@ final class DockHandoffTracker: @unchecked Sendable {
     private let itemElements = OSAllocatedUnfairLock<[String: AXUIElement]>(initialState: [:])
 
     private var rebuildScheduled = false
-    private let dockObserver = DockAXObserver()
+    private let dockObserver: DockAXObserver
 
-    init() {}
+    init(dockObserver: DockAXObserver = DockAXObserver()) {
+        self.dockObserver = dockObserver
+    }
+
     deinit { stop() }
 
     // MARK: Lifecycle
@@ -49,8 +52,7 @@ final class DockHandoffTracker: @unchecked Sendable {
         guard !isActive.withLock({ $0 }) else { return }
         isActive.withLock { $0 = true }
         Logger.info("Starting native-dock handoff tracking")
-        dockObserver.onChange = { [weak self] in self?.scheduleRebuild() }
-        dockObserver.start()
+        dockObserver.subscribe(self, onChange: { [weak self] in self?.scheduleRebuild() })
         scheduleRebuild()
     }
 
@@ -58,7 +60,7 @@ final class DockHandoffTracker: @unchecked Sendable {
         guard isActive.withLock({ $0 }) else { return }
         isActive.withLock { $0 = false }
         Logger.info("Stopping native-dock handoff tracking")
-        dockObserver.stop()
+        dockObserver.unsubscribe(self)
         itemElements.withLock { $0 = [:] }
         queue.async { [weak self] in self?.rebuildScheduled = false }
         if !subject.value.isEmpty { subject.send([]) }

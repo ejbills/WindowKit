@@ -19,24 +19,26 @@ final class MinimizeTransitionTracker: @unchecked Sendable {
     private let subject = PassthroughSubject<String, Never>()
 
     private let isActive = OSAllocatedUnfairLock(initialState: false)
-    private let dockObserver = DockAXObserver(runLoopMode: .commonModes)
+    private let dockObserver: DockAXObserver
 
-    init() {}
+    init(dockObserver: DockAXObserver = DockAXObserver(runLoopMode: .commonModes)) {
+        self.dockObserver = dockObserver
+    }
+
     deinit { stop() }
 
     func start() {
         guard !isActive.withLock({ $0 }) else { return }
         isActive.withLock { $0 = true }
         Logger.info("Starting minimize transition tracking")
-        dockObserver.onCreated = { [weak self] element in self?.itemCreated(element) }
-        dockObserver.start()
+        dockObserver.subscribe(self, onCreated: { [weak self] element in self?.itemCreated(element) })
     }
 
     func stop() {
         guard isActive.withLock({ $0 }) else { return }
         isActive.withLock { $0 = false }
         Logger.info("Stopping minimize transition tracking")
-        dockObserver.stop()
+        dockObserver.unsubscribe(self)
     }
 
     /// Reads the new item off the main thread with a short timeout, so a wedged Dock never stalls the caller.
