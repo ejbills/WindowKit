@@ -230,6 +230,54 @@ extension CapturedWindow {
         isMinimized = false
     }
 
+    /// Minimizes the window while its owner app is hidden, so the Dock has nothing on screen to animate.
+    /// The app's other windows leave the screen for the ~50-100ms this takes, and a frontmost owner is
+    /// activated again afterwards (hiding hands focus to another app). Returns whether the minimize landed.
+    mutating func minimizeHidingOwner(reactivate: Bool) async throws -> Bool {
+        guard !isMinimized else { return true }
+        let axEl = axElement
+        let appAx = appAxElement
+        let pid = ownerPID
+        let landed = try await Self.offMain {
+            let landed = try Self.whileOwnerHidden(appAx) {
+                try axEl.setAttribute(kAXMinimizedAttribute, value: true)
+                return Self.waitUntil { (try? axEl.isMinimized()) == true }
+            }
+            if landed, reactivate {
+                _ = RunningApplicationResolver.application(forProcessIdentifier: pid)?.activate()
+            }
+            return landed
+        }
+        if landed { isMinimized = true }
+        return landed
+    }
+
+    /// Hides the owner app over AX, runs `work` once it is hidden, then unhides it. The app drops an AX
+    /// request it hasn't acted on when it unhides, so `work` waits for its own result before returning.
+    private static func whileOwnerHidden(_ appAx: AXUIElement, _ work: () throws -> Bool) throws -> Bool {
+        let wasHidden = (try? appAx.attribute(kAXHiddenAttribute, as: Bool.self)) == true
+        if !wasHidden {
+            try appAx.setAttribute(kAXHiddenAttribute, value: true)
+            guard waitUntil({ (try? appAx.attribute(kAXHiddenAttribute, as: Bool.self)) == true }) else {
+                try? appAx.setAttribute(kAXHiddenAttribute, value: false)
+                return false
+            }
+        }
+        defer {
+            if !wasHidden { try? appAx.setAttribute(kAXHiddenAttribute, value: false) }
+        }
+        return try work()
+    }
+
+    private static func waitUntil(timeout: TimeInterval = 0.4, _ condition: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if condition() { return true }
+            usleep(2000)
+        } while Date() < deadline
+        return false
+    }
+
     @discardableResult
     public mutating func toggleHidden() async throws -> Bool {
         let newHiddenState = !isOwnerHidden

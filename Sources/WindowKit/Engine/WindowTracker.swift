@@ -464,6 +464,16 @@ public final class WindowTracker {
         return minimized
     }
 
+    /// Minimizes the window with its owner app hidden, so the Dock plays no animation, and reflects it in
+    /// the cache. Returns whether the minimize landed; the window is left as it was otherwise.
+    func minimizeWindowHidingOwner(_ window: CapturedWindow, reactivate: Bool) async throws -> Bool {
+        guard !repository.isExcludedOrIgnored(window.ownerPID) else { return true }
+        var target = window
+        guard try await target.minimizeHidingOwner(reactivate: reactivate) else { return false }
+        applyCachedWindowState(windowID: window.id, pid: window.ownerPID) { $0.isMinimized = true }
+        return true
+    }
+
     /// Brings the window to front and immediately reflects the unminimize/unhide
     /// side effects in the cache.
     public func focusWindow(_ window: CapturedWindow) async throws {

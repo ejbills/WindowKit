@@ -243,6 +243,22 @@ WindowKit.shared.processSwitcherEvents
 
 Requires Accessibility permission and is started/stopped alongside `beginTracking()` / `endTracking()`.
 
+### Minimize Transitions
+
+WindowKit can announce every minimize as it begins, early enough for a host to draw its own animation, and can perform its own minimizes and restores without the native Dock animation.
+
+- **Minimizes started elsewhere** (yellow button, Cmd+M, title-bar double-click): the native Dock adds an `AXMinimizedWindowDockItem` to its accessibility tree ~30ms before its animation is visible, while the owner app's own miniaturized notification only arrives once the ~0.5s animation has finished. The item carries only the window title, so WindowKit resolves it to a cached window (the frontmost app's first, then the most recently used). These announce with `showsNativeAnimation == true`.
+- **Minimizes WindowKit performs** (`minimizeWindow`, and `toggleMinimizeWindow` on a visible window): announced with a one-off full-resolution capture before they start, then run with the owner app hidden over AX. The Dock has nothing on screen to animate, so none plays (`showsNativeAnimation == false`). The app's other windows leave the screen for ~50–100ms, and a frontmost owner is activated again afterwards.
+- **Restores WindowKit performs** (`restoreWindow`, `toggleMinimizeWindow` and `focusWindow` on a minimized window): announced with a one-off full-resolution capture, then run as usual after `restoreLeadTime` so a host can cover the native animation (`showsNativeAnimation == true`). Hiding the owner doesn't help here: the Dock replays the genie-out of any window it minimized with an animation, even while the owner is hidden.
+
+| Member | Type | Description |
+|---|---|---|
+| `minimizeTransitions` | `AnyPublisher<MinimizeTransition, Never>` | Every minimize, and every restore WindowKit performs, as it begins, on the main thread. WindowKit's own transitions carry `image`, a one-off full-resolution capture that is never cached. |
+| `tracksMinimizeTransitions` | `Bool` | Opt-in toggle (default `false`). Flipping it live starts/stops the subsystem. |
+| `restoreLeadTime` | `TimeInterval` | How long WindowKit's own restores wait after being announced before they start (default `0`). |
+
+Requires Accessibility permission (plus Screen Recording for the announced preview). Minimizes started elsewhere are only seen with the native Dock's "Minimize windows into application icon" turned off, since that mode creates no per-window Dock item.
+
 ### Events
 
 Subscribe to window lifecycle changes via Combine:
