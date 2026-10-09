@@ -171,6 +171,10 @@ private typealias SLSReleaseWindowType = @convention(c) (CGSConnectionID, CGWind
 private var releaseWindowPtr: SLSReleaseWindowType?
 private typealias CGSNewRegionWithRectType = @convention(c) (UnsafePointer<CGRect>, UnsafeMutablePointer<Unmanaged<CFTypeRef>?>) -> CGError
 private var newRegionWithRectPtr: CGSNewRegionWithRectType?
+private typealias SLSGetDockRectWithOrientationType = @convention(c) (
+    CGSConnectionID, UnsafeMutablePointer<CGRect>, UnsafeMutablePointer<Int32>, UnsafeMutablePointer<Int32>
+) -> CGError
+private var getDockRectWithOrientationPtr: SLSGetDockRectWithOrientationType?
 
 private func loadSkyLightFunctions() {
     guard skyLightHandle == nil else { return }
@@ -237,6 +241,10 @@ private func loadSkyLightFunctions() {
     if let symbol = dlsym(handle, "CGSNewRegionWithRect") {
         newRegionWithRectPtr = unsafeBitCast(symbol, to: CGSNewRegionWithRectType.self)
     }
+
+    if let symbol = dlsym(handle, "SLSGetDockRectWithOrientation") {
+        getDockRectWithOrientationPtr = unsafeBitCast(symbol, to: SLSGetDockRectWithOrientationType.self)
+    }
 }
 
 func _SLPSSetFrontProcessWithOptions(
@@ -262,6 +270,18 @@ func SLPSPostEventRecordTo(
 
 public func cgsMainConnection() -> CGSConnectionID {
     CGSMainConnectionID()
+}
+
+/// The native Dock's frame as the WindowServer publishes it (global display coordinates, top-left origin). An
+/// auto-hidden Dock reports its zero-width edge strip.
+public func cgsNativeDockFrame() -> CGRect? {
+    loadSkyLightFunctions()
+    guard let fn = getDockRectWithOrientationPtr else { return nil }
+    var rect = CGRect.zero
+    var reason: Int32 = 0
+    var orientation: Int32 = 0
+    guard fn(cgsMainConnection(), &rect, &reason, &orientation) == .success, !rect.isNull else { return nil }
+    return rect
 }
 
 public func cgsHardwareCaptureWindows(
@@ -429,11 +449,11 @@ public func cgWindowDescriptors(forPID pid: pid_t) -> [CGWindowDescriptor] {
     }
 }
 
-/// Windows currently on screen at `layer`, front to back. Pass nil for every layer.
-public func cgOnScreenWindowDescriptors(layer: Int? = 0) -> [CGWindowDescriptor] {
-    guard let windowList = CGWindowListCopyWindowInfo(
-        [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
-    ) as? [[String: AnyObject]] else {
+/// Windows currently on screen at `layer`, front to back. Pass nil for every layer; `includingDesktop` adds the
+/// wallpaper and desktop icons.
+public func cgOnScreenWindowDescriptors(layer: Int? = 0, includingDesktop: Bool = false) -> [CGWindowDescriptor] {
+    let options: CGWindowListOption = includingDesktop ? [.optionOnScreenOnly] : [.optionOnScreenOnly, .excludeDesktopElements]
+    guard let windowList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: AnyObject]] else {
         return []
     }
 

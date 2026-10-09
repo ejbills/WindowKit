@@ -172,6 +172,38 @@ public struct ScreenshotService: Sendable {
         return results
     }
 
+    private static let createImageFromArray: (@convention(c) (CGRect, CFArray, UInt32) -> Unmanaged<CGImage>?)? = {
+        guard let sym = dlsym(dlopen(nil, RTLD_LAZY), "CGWindowListCreateImageFromArray") else { return nil }
+        return unsafeBitCast(sym, to: (@convention(c) (CGRect, CFArray, UInt32) -> Unmanaged<CGImage>?).self)
+    }()
+
+    /// Each display composited at full resolution from its on-screen windows, desktop included, leaving out
+    /// `excludedWindows` and every window `excludedOwner` owns. Synchronous WindowServer work; call off the main thread.
+    public func captureDisplays(
+        _ displayIDs: [CGDirectDisplayID],
+        excludingWindows excludedWindows: Set<CGWindowID>,
+        excludingOwner excludedOwner: pid_t
+    ) -> [CGDirectDisplayID: CGImage] {
+        guard !headless, SystemPermissions.hasScreenRecording(), let createImageFromArray = Self.createImageFromArray else {
+            return [:]
+        }
+        var windows: [UnsafeRawPointer?] = cgOnScreenWindowDescriptors(layer: nil, includingDesktop: true)
+            .filter { !excludedWindows.contains($0.windowID) && $0.ownerPID != excludedOwner }
+            .map { UnsafeRawPointer(bitPattern: UInt($0.windowID)) }
+        guard let windowArray = CFArrayCreate(nil, &windows, windows.count, nil) else { return [:] }
+        let lock = NSLock()
+        var images: [CGDirectDisplayID: CGImage] = [:]
+        DispatchQueue.concurrentPerform(iterations: displayIDs.count) { index in
+            let displayID = displayIDs[index]
+            guard let image = createImageFromArray(
+                CGDisplayBounds(displayID), windowArray, CGWindowImageOption.bestResolution.rawValue
+            )?.takeRetainedValue() else { return }
+            Self.cgImageSetCachingFlags?(image, Self.kCGImageCachingTransient)
+            lock.withLock { images[displayID] = image }
+        }
+        return images
+    }
+
     /// Composited screen contents of `rect` (global display coordinates, top-left origin) on one display, without the cursor.
     public func captureDisplayRegion(_ rect: CGRect, displayID: CGDirectDisplayID, scale: CGFloat) async throws -> CGImage {
         guard !headless, SystemPermissions.hasScreenRecording() else {
