@@ -268,7 +268,7 @@ extension CapturedWindow {
 /// whose exit can commit another Space), and from a `WindowKit.focusWindow`
 /// call for a window on no visible Space until the Space change settles.
 /// Commits started elsewhere (Cmd-Tab, swipes, Ctrl-arrow) have no early
-/// signal and keep the flicker.
+/// signal and keep the flicker, unless `restsElevated` is set.
 ///
 /// Do not raise `elevatedLevel` past 100: 200/300/400 are the system shields
 /// (`WindowStash` uses 400) and a Space there would draw over the lock screen.
@@ -280,13 +280,44 @@ public final class WindowOverlaySpace {
     /// rest for its lifetime.
     public let elevatedLevel: Int32
 
+    /// Rests at `elevatedLevel` so no Space commit flickers, dropping to 0 only while a drag
+    /// is in flight or a foreign menu covers a member.
+    public var restsElevated = false {
+        didSet {
+            guard restsElevated != oldValue else { return }
+            updateRestingLevel()
+        }
+    }
+
     private let connection: CGSConnectionID
     private var currentLevel = WindowOverlaySpace.restingLevel
     private var held = false
     private var commitRelease: DispatchWorkItem?
     private var subscriptions = Set<AnyCancellable>()
 
+    private var elevatedAtRest = false
+    private let dragPasteboard = NSPasteboard(name: .drag)
+    private let ownPID = getpid()
+    private var mouseMonitors: [Any] = []
+    private var dragPasteboardBaseline = 0
+    private var dragInFlight = false
+    private var dragCheck: DispatchWorkItem?
+    private var membershipNotifier: SkyLightConnectionNotifier?
+    private let members = NSHashTable<NSWindow>.weakObjects()
+
+    /// Foreign menus covering a member, with how many Spaces each is on; menus join every
+    /// shown Space and leave all but one, so only the last leave releases.
+    private var coveringWindows: [CGWindowID: Int] = [:]
+
     private static let restingLevel: Int32 = 0
+
+    private static let popUpMenuLevel = Int(CGWindowLevelForKey(.popUpMenuWindow))
+
+    /// Drag-pasteboard check interval between a press and its release.
+    private static let pressPollInterval: TimeInterval = 0.06
+
+    /// Delay after a drag's release before rising, so the drop lands while routable.
+    private static let dragRestoreDelay: TimeInterval = 0.25
 
     /// How long a commit hold waits for the Space change before dropping.
     private static let commitTimeout: TimeInterval = 1.0
@@ -305,6 +336,14 @@ public final class WindowOverlaySpace {
         id = spaceID
 
         installCommitSignals()
+    }
+
+    deinit {
+        dragCheck?.cancel()
+        let installedMonitors = mouseMonitors
+        DispatchQueue.main.async {
+            installedMonitors.forEach(NSEvent.removeMonitor)
+        }
     }
 
     /// Keeps the Space elevated while `isHeld`. Releasing keeps it up through
@@ -373,13 +412,149 @@ public final class WindowOverlaySpace {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
+    private func updateRestingLevel() {
+        if restsElevated, elevatedLevel != Self.restingLevel {
+            elevatedAtRest = installYieldGates()
+        } else {
+            removeYieldGates()
+            elevatedAtRest = false
+        }
+        applyLevel()
+    }
+
+    /// Press/release monitors for the drag check and Space-membership events for covering
+    /// menus. False without a global mouse monitor, since no drop could then reach a member.
+    private func installYieldGates() -> Bool {
+        let mask: NSEvent.EventTypeMask = [
+            .leftMouseDown, .rightMouseDown, .otherMouseDown,
+            .leftMouseUp, .rightMouseUp, .otherMouseUp,
+        ]
+        guard let globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask, handler: { [weak self] event in
+            MainActor.assumeIsolated { self?.handleMouseEvent(event) }
+        }) else {
+            Logger.error("Overlay Space: no global mouse monitor, resting at 0")
+            return false
+        }
+        mouseMonitors.append(globalMonitor)
+        if let localMonitor = NSEvent.addLocalMonitorForEvents(matching: mask, handler: { [weak self] event in
+            MainActor.assumeIsolated { self?.handleMouseEvent(event) }
+            return event
+        }) {
+            mouseMonitors.append(localMonitor)
+        }
+
+        membershipNotifier = SkyLightConnectionNotifier(events: [.windowAddedToSpace, .windowRemovedFromSpace]) { [weak self] event, payload in
+            guard let windowID = SkyLightEvent.windowID(in: payload) else { return }
+            self?.handleMembershipEvent(event, windowID: windowID)
+        }
+
+        if NSEvent.pressedMouseButtons != 0 {
+            dragPasteboardBaseline = dragPasteboard.changeCount
+            checkPress()
+        }
+        return true
+    }
+
+    private func removeYieldGates() {
+        mouseMonitors.forEach(NSEvent.removeMonitor)
+        mouseMonitors.removeAll()
+        membershipNotifier = nil
+        dragCheck?.cancel()
+        dragCheck = nil
+        dragInFlight = false
+        coveringWindows.removeAll()
+    }
+
+    private func handleMouseEvent(_ event: NSEvent) {
+        switch event.type {
+        case .leftMouseDown, .rightMouseDown, .otherMouseDown:
+            dragPasteboardBaseline = dragPasteboard.changeCount
+        default:
+            break
+        }
+        checkPress()
+    }
+
+    /// Lowers once the drag pasteboard changes during a press. A press alone must not lower:
+    /// a click that activates an app on another Space commits it with the button down.
+    private func checkPress() {
+        guard NSEvent.pressedMouseButtons != 0 else {
+            if dragInFlight {
+                scheduleDragCheck(after: Self.dragRestoreDelay) { $0.restoreAfterDrag() }
+            }
+            return
+        }
+
+        if !dragInFlight, dragPasteboard.changeCount != dragPasteboardBaseline {
+            dragInFlight = true
+            applyLevel()
+        }
+        scheduleDragCheck(after: Self.pressPollInterval) { $0.checkPress() }
+    }
+
+    private func restoreAfterDrag() {
+        guard NSEvent.pressedMouseButtons == 0 else {
+            checkPress()
+            return
+        }
+        dragInFlight = false
+        applyLevel()
+    }
+
+    private func scheduleDragCheck(after delay: TimeInterval, _ body: @escaping (WindowOverlaySpace) -> Void) {
+        dragCheck?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            dragCheck = nil
+            body(self)
+        }
+        dragCheck = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func handleMembershipEvent(_ event: SkyLightEvent, windowID: CGWindowID) {
+        switch event {
+        case .windowAddedToSpace:
+            if let count = coveringWindows[windowID] {
+                coveringWindows[windowID] = count + 1
+            } else if isCoveringMember(windowID) {
+                coveringWindows[windowID] = 1
+                applyLevel()
+            }
+        case .windowRemovedFromSpace:
+            guard let count = coveringWindows[windowID] else { return }
+            if count > 1 {
+                coveringWindows[windowID] = count - 1
+            } else {
+                coveringWindows[windowID] = nil
+                applyLevel()
+            }
+        default:
+            break
+        }
+    }
+
+    /// Whether a foreign on-screen popup menu overlaps a visible member. Only the menu level
+    /// counts, so Mission Control's window never lowers the Space mid-commit.
+    private func isCoveringMember(_ windowID: CGWindowID) -> Bool {
+        guard let window = cgWindowDescriptor(forWindowID: windowID),
+              window.ownerPID != ownPID, window.isOnScreen, window.layer == Self.popUpMenuLevel else { return false }
+        return members.allObjects.contains { $0.isVisible && ScreenCoordinates.axRect(fromAppKit: $0.frame).intersects(window.bounds) }
+    }
+
     private func applyLevel() {
-        setLevel(held || commitRelease != nil ? elevatedLevel : Self.restingLevel)
+        let raised = elevatedAtRest
+            ? !dragInFlight && coveringWindows.isEmpty
+            : held || commitRelease != nil
+        setLevel(raised ? elevatedLevel : Self.restingLevel)
     }
 
     private func setLevel(_ level: Int32) {
         guard level != currentLevel else { return }
-        Logger.debug("Overlay Space level \(currentLevel) -> \(level)", details: "held=\(held), awaitingCommit=\(commitRelease != nil)")
+        Logger.debug(
+            "Overlay Space level \(currentLevel) -> \(level)",
+            details: "held=\(held), awaitingCommit=\(commitRelease != nil), elevatedAtRest=\(elevatedAtRest), drag=\(dragInFlight), covering=\(Array(coveringWindows.keys))"
+        )
         currentLevel = level
         slsSetSpaceAbsoluteLevel(connection, id, level)
     }
@@ -388,6 +563,7 @@ public final class WindowOverlaySpace {
     /// Space. Call after the window is ordered on screen.
     public func add(_ window: NSWindow) {
         slsSpaceAddWindows(connection, id, [CGWindowID(window.windowNumber)])
+        members.add(window)
     }
 }
 
