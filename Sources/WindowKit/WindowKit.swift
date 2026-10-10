@@ -980,22 +980,29 @@ public final class WindowKit {
     }
 
     /// Resolves the title of a Dock item that just appeared to the window being minimized, among cached windows
-    /// with that title (or fuzzy matches when none has it). A window WindowKit is minimizing itself swallows the
-    /// item. Otherwise an unminimized match is announced, the frontmost app's first, then the most recently used;
-    /// nothing is when every match is already minimized (an item re-created for an old minimize). Never asks the
-    /// owner app, whose main thread is busy in the minimize.
+    /// whose title matches it (see `windows(_:matchingDockTitle:)`), or the frontmost app's only on-screen window
+    /// when none does. A window WindowKit is minimizing itself swallows the item. Otherwise an unminimized match is
+    /// announced, the frontmost app's first, then the most recently used; nothing is when every match is already
+    /// minimized (an item re-created for an old minimize). Never asks the owner app, whose main thread is busy in
+    /// the minimize.
     private func minimizeStarted(title: String) {
         let now = Date()
         pruneMinimizeStartMatches(now: now)
         let cached = tracker.repository.readAllCache()
-        let exact = cached.filter { ($0.title ?? "") == title }
-        let titled = exact.isEmpty ? cached.filter { WindowEnumerator.isFuzzyTitleMatch($0.title ?? "", title) } : exact
+        let frontPID = frontmostApplication.flatMap(processIdentifier(of:))
+        var titled = Self.windows(cached, matchingDockTitle: title)
+        if titled.isEmpty, let frontPID {
+            let onScreen = cached.filter { $0.ownerPID == frontPID && !$0.isMinimized && !$0.isOwnerHidden }
+            if onScreen.count == 1 {
+                titled = onScreen
+                Logger.debug("Minimize start matched the frontmost app's only window", details: "title=\(title)")
+            }
+        }
         if let own = titled.first(where: { ownMinimizes[$0.id] != nil }) {
             ownMinimizes.removeValue(forKey: own.id)
             matchedMinimizeStarts[own.id] = now
             return
         }
-        let frontPID = frontmostApplication.flatMap(processIdentifier(of:))
         let rank = { (window: CapturedWindow) in (window.ownerPID == frontPID ? 1 : 0, window.lastInteractionTime) }
         let candidates = titled.filter { !$0.isMinimized && matchedMinimizeStarts[$0.id] == nil }
         guard let window = candidates.max(by: { rank($0) < rank($1) }) else {
@@ -1009,6 +1016,28 @@ public final class WindowKit {
         minimizeTransitionSubject.send(MinimizeTransition(
             kind: .minimize, window: window, image: nil, isPerformedByWindowKit: false
         ))
+    }
+
+    /// Cached windows a Dock item's title refers to: exact matches, else matches ignoring tokens with no letter or
+    /// digit, else fuzzy matches. Status glyphs such as a terminal's spinner or an editor's unsaved dot change
+    /// faster than cached titles refresh, and on a short title one changed glyph sinks the fuzzy match.
+    static func windows(_ windows: [CapturedWindow], matchingDockTitle title: String) -> [CapturedWindow] {
+        let exact = windows.filter { ($0.title ?? "") == title }
+        if !exact.isEmpty { return exact }
+        let significant = significantTitle(title)
+        if !significant.isEmpty {
+            let glyphless = windows.filter { significantTitle($0.title ?? "") == significant }
+            if !glyphless.isEmpty { return glyphless }
+        }
+        return windows.filter { WindowEnumerator.isFuzzyTitleMatch($0.title ?? "", title) }
+    }
+
+    /// `title` lowercased, without the whitespace-separated tokens that hold no letter or digit.
+    static func significantTitle(_ title: String) -> String {
+        title.lowercased()
+            .split(whereSeparator: \.isWhitespace)
+            .filter { $0.contains { $0.isLetter || $0.isNumber } }
+            .joined(separator: " ")
     }
 
     /// Hides the window's owner application, marking all its cached windows hidden.
