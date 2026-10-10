@@ -82,6 +82,8 @@ public final class WindowTracker {
     private static let destroyMaxInterval: Duration = .milliseconds(800)
     private static let destroyEscalationFactor: Double = 2.0
     private static let destroyResetThreshold: Duration = .milliseconds(1500)
+    private static let destroyUnresponsiveRetryInterval: Duration = .seconds(2)
+    private static let destroyUnresponsiveRetries = 3
 
     public init() {
         let repository = WindowRepository()
@@ -300,7 +302,7 @@ public final class WindowTracker {
                 forPID: pid,
                 preservingWindowIDs: discoveryResult.externallyVisibleWindowIDs,
                 validator: { window in
-                    enumerator.isValidElement(window.axElement) &&
+                    enumerator.liveness(of: window.axElement) != .gone &&
                         !enumerator.isOrderedOutWindow(
                             windowID: window.id,
                             element: window.axElement,
@@ -1031,41 +1033,66 @@ public final class WindowTracker {
         }
 
         debounce(key: "window-destroyed-\(pid)", interval: interval) { [weak self] in
-            guard let self else { return }
-            guard let app = RunningApplicationResolver.application(forProcessIdentifier: pid) else { return }
-            Logger.debug("Destroy handler fired", details: "pid=\(pid), policy=\(app.activationPolicy.rawValue), terminated=\(app.isTerminated), hidden=\(app.isHidden)")
+            self?.validateWindowsAfterDestroy(forPID: pid, attempt: 0)
+        }
+    }
 
-            if app.isHidden {
-                Logger.debug("Skipping destroy — app is hidden", details: "pid=\(pid)")
-                return
+    /// Drops cached windows its app no longer reports; windows it didn't answer for are kept and re-checked.
+    private func validateWindowsAfterDestroy(forPID pid: pid_t, attempt: Int) {
+        guard let app = RunningApplicationResolver.application(forProcessIdentifier: pid) else { return }
+        Logger.debug("Destroy handler fired", details: "pid=\(pid), attempt=\(attempt), policy=\(app.activationPolicy.rawValue), terminated=\(app.isTerminated), hidden=\(app.isHidden)")
+
+        if app.isHidden {
+            Logger.debug("Skipping destroy — app is hidden", details: "pid=\(pid)")
+            return
+        }
+
+        let cached = repository.readCache(forPID: pid)
+        if !cached.isEmpty, cached.allSatisfy(\.isMinimized) {
+            Logger.debug("Skipping destroy — all windows minimized", details: "pid=\(pid), count=\(cached.count)")
+            return
+        }
+
+        if app.isTerminated || app.activationPolicy != .regular {
+            Logger.debug("App terminated or no longer .regular during destroy, purging all", details: "pid=\(pid)")
+            let windows = repository.readCache(forPID: pid)
+            repository.removeAll(forPID: pid)
+            for window in windows {
+                eventSubject.send(.windowDisappeared(window.id))
             }
+            return
+        }
 
-            let cached = repository.readCache(forPID: pid)
-            if !cached.isEmpty, cached.allSatisfy(\.isMinimized) {
-                Logger.debug("Skipping destroy — all windows minimized", details: "pid=\(pid), count=\(cached.count)")
-                return
-            }
-
-            if app.isTerminated || app.activationPolicy != .regular {
-                Logger.debug("App terminated or no longer .regular during destroy, purging all", details: "pid=\(pid)")
-                let windows = repository.readCache(forPID: pid)
-                repository.removeAll(forPID: pid)
-                for window in windows {
-                    eventSubject.send(.windowDisappeared(window.id))
-                }
-            } else {
-                var invalidElements: [CGWindowID: AXUIElement] = [:]
-                for window in cached where !enumerator.isValidElement(window.axElement, isMinimized: window.isMinimized, isHidden: window.isOwnerHidden) {
-                    invalidElements[window.id] = window.axElement
-                }
-                guard !invalidElements.isEmpty else { return }
-                let changes = repository.modify(forPID: pid) { windows in
-                    windows = windows.filter { invalidElements[$0.id] != $0.axElement }
-                }
-                Logger.debug("Filtered invalid windows", details: "pid=\(pid), removed=\(changes.removed.count)")
-                emitChanges(changes)
+        var invalidElements: [CGWindowID: AXUIElement] = [:]
+        var unresponsiveCount = 0
+        for window in cached {
+            switch enumerator.liveness(of: window.axElement, isMinimized: window.isMinimized, isHidden: window.isOwnerHidden) {
+            case .alive:
+                break
+            case .gone:
+                invalidElements[window.id] = window.axElement
+            case .unresponsive:
+                unresponsiveCount += 1
             }
         }
+
+        if unresponsiveCount > 0 {
+            if attempt < Self.destroyUnresponsiveRetries {
+                Logger.debug("Destroy validation deferred, app unresponsive", details: "pid=\(pid), windows=\(unresponsiveCount), attempt=\(attempt + 1)")
+                debounce(key: "window-destroyed-\(pid)", interval: Self.destroyUnresponsiveRetryInterval) { [weak self] in
+                    self?.validateWindowsAfterDestroy(forPID: pid, attempt: attempt + 1)
+                }
+            } else {
+                Logger.debug("Destroy validation gave up, keeping unresponsive windows", details: "pid=\(pid), windows=\(unresponsiveCount)")
+            }
+        }
+
+        guard !invalidElements.isEmpty else { return }
+        let changes = repository.modify(forPID: pid) { windows in
+            windows = windows.filter { invalidElements[$0.id] != $0.axElement }
+        }
+        Logger.debug("Filtered invalid windows", details: "pid=\(pid), removed=\(changes.removed.count)")
+        emitChanges(changes)
     }
 
     /// Throttle for high-rate event streams: the first event schedules

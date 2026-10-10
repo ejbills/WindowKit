@@ -228,48 +228,52 @@ public struct WindowEnumerator {
         guard Set(windowID.spaces()).isEmpty else { return false }
         guard cgsWindowIsOrderedIn(cgsMainConnection(), windowID) == false else { return false }
 
-        let isMinimized = (try? element.isMinimized()) ?? false
-        let isFullscreen = (try? element.isFullscreen()) ?? false
-        return !isMinimized && !isFullscreen
+        do {
+            let isMinimized = try element.isMinimized()
+            let isFullscreen = try element.isFullscreen()
+            return !isMinimized && !isFullscreen
+        } catch {
+            return false
+        }
     }
 
     public func isValidElement(_ element: AXUIElement, isMinimized: Bool = false, isHidden: Bool = false) -> Bool {
-        if isMinimized || isHidden { return true }
+        liveness(of: element, isMinimized: isMinimized, isHidden: isHidden) == .alive
+    }
+
+    /// `unresponsive`: the app hit the AX messaging timeout, so the window may still exist.
+    enum ElementLiveness {
+        case alive
+        case gone
+        case unresponsive
+    }
+
+    func liveness(of element: AXUIElement, isMinimized: Bool = false, isHidden: Bool = false) -> ElementLiveness {
+        if isMinimized || isHidden { return .alive }
 
         do {
             if let _ = try element.position(), let _ = try element.size() {
-                return true
+                return .alive
             }
-        } catch AccessibilityError.operationFailed {
-            return false
         } catch {
-            // Geometry check failed, try slow path
+            return .unresponsive
         }
 
         do {
-            if let pid = try element.processID() {
-                let appElement = AXUIElement.application(pid: pid)
-                if let windows = try? appElement.windows() {
-                    if let elementWindowID = try? element.windowID() {
-                        for window in windows {
-                            if let windowID = try? window.windowID(), windowID == elementWindowID {
-                                return true
-                            }
-                        }
-                    }
+            guard let pid = try element.processID(),
+                  let windows = try AXUIElement.application(pid: pid).windows()
+            else { return .gone }
 
-                    for window in windows {
-                        if CFEqual(element, window) {
-                            return true
-                        }
-                    }
-                }
+            if let elementWindowID = try? element.windowID(),
+               windows.contains(where: { (try? $0.windowID()) == elementWindowID })
+            {
+                return .alive
             }
+            return windows.contains(where: { CFEqual(element, $0) }) ? .alive : .gone
         } catch {
-            Logger.debug("isValidElement validation failed", details: "\(error)")
+            Logger.debug("Window liveness unknown, app unresponsive", details: "\(error)")
+            return .unresponsive
         }
-
-        return false
     }
 }
 
