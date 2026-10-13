@@ -20,6 +20,12 @@ public struct ManagedDisplay: Identifiable, Hashable, Sendable {
             return screen.displayUUIDString == displayIdentifier
         }
     }
+
+    /// The screens this display's Spaces show on: every screen for the single
+    /// "Main" display SkyLight reports while "Displays have separate Spaces" is off.
+    public var screens: [NSScreen] {
+        displayIdentifier == "Main" ? NSScreen.screens : screen.map { [$0] } ?? []
+    }
 }
 
 public struct ManagedSpace: Identifiable, Hashable, Sendable {
