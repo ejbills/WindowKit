@@ -429,25 +429,33 @@ final class AppSwitcherObserver: @unchecked Sendable {
         )
     }
 
-    /// Resolves the selected item to a running app via its `kAXURLAttribute` bundle,
-    /// falling back to matching the AX title against running applications.
+    /// Resolves the selected item via its `kAXURLAttribute` bundle, else its AX title. The switcher
+    /// lists only regular apps, so same-named helpers (Messages' AssistantExtension) never match.
     private func resolveApp(for item: AXUIElement, title: String?) -> (pid: pid_t, bundleID: String?) {
         if let nsURL = try? item.attribute(kAXURLAttribute, as: NSURL.self),
            let bundle = Bundle(url: nsURL as URL),
            let bundleID = bundle.bundleIdentifier,
-           let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first {
+           let app = Self.preferringRegular(NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)) {
             return (RunningApplicationResolver.resolving(app).processIdentifier, bundleID)
         }
 
         if let title, !title.isEmpty {
             let apps = NSWorkspace.shared.runningApplications
-            if let app = apps.first(where: { $0.localizedName == title })
-                ?? apps.first(where: { matchesLoosely($0.localizedName, title) }) {
+            if let app = apps.first(where: { $0.localizedName == title && Self.isRegular($0) })
+                ?? apps.first(where: { matchesLoosely($0.localizedName, title) && Self.isRegular($0) }) {
                 return (RunningApplicationResolver.resolving(app).processIdentifier, app.bundleIdentifier)
             }
         }
 
         return (0, nil)
+    }
+
+    private static func isRegular(_ app: NSRunningApplication) -> Bool {
+        app.activationPolicy == .regular
+    }
+
+    private static func preferringRegular(_ apps: [NSRunningApplication]) -> NSRunningApplication? {
+        apps.first(where: isRegular) ?? apps.first
     }
 
     private func matchesLoosely(_ name: String?, _ title: String) -> Bool {
