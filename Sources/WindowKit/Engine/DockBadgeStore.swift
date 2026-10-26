@@ -9,6 +9,12 @@ public final class DockBadgeStore: @unchecked Sendable {
     /// Cached dock AXUIElement references keyed by stable app identity for fast polling.
     private var cachedDockElements: [DockAppKey: CachedDockElement] = [:]
     private var lastRebuildTime: CFAbsoluteTime = 0
+    private var cachedDockPID: pid_t = 0
+    /// Running apps the last poll found no tile for; the poll rebuilds after `missRebuildDelay`.
+    private var lastPollMissedRunningApps = false
+    private var missRebuildDelay: CFAbsoluteTime = DockBadgeStore.minMissRebuildDelay
+    private static let minMissRebuildDelay: CFAbsoluteTime = 2
+    private static let maxMissRebuildDelay: CFAbsoluteTime = 60
 
     public init() {}
 
@@ -159,11 +165,15 @@ public final class DockBadgeStore: @unchecked Sendable {
             return DockBadgeRefreshChanges()
         }
 
-        // Ensure cache is populated
+        // Ensure cache is populated, and retry tiles the last poll missed: a cache read while the
+        // Dock was (re)launching lacks tiles and is otherwise kept until an app launches or quits.
+        dropCacheIfDockExited()
         lock.lock()
         let cacheEmpty = cachedDockElements.isEmpty
+        let retryMisses = lastPollMissedRunningApps &&
+            CFAbsoluteTimeGetCurrent() - lastRebuildTime >= missRebuildDelay
         lock.unlock()
-        if cacheEmpty {
+        if cacheEmpty || retryMisses {
             rebuildCache()
         }
 
@@ -180,6 +190,16 @@ public final class DockBadgeStore: @unchecked Sendable {
         lock.unlock()
 
         guard !cache.isEmpty else { return DockBadgeRefreshChanges() }
+
+        let missedRunningApps = appKeysByPID.values.contains { DockAppKey.elements(for: $0, in: cache) == nil }
+        lock.lock()
+        lastPollMissedRunningApps = missedRunningApps
+        if !missedRunningApps {
+            missRebuildDelay = Self.minMissRebuildDelay
+        } else if retryMisses {
+            missRebuildDelay = min(missRebuildDelay * 2, Self.maxMissRebuildDelay)
+        }
+        lock.unlock()
 
         for (pid, appKeys) in appKeysByPID {
             if let element = DockAppKey.element(for: appKeys, in: cache) {
@@ -253,6 +273,7 @@ public final class DockBadgeStore: @unchecked Sendable {
     public func invalidateCache() {
         lock.lock()
         cachedDockElements.removeAll()
+        cachedDockPID = 0
         lastRebuildTime = 0
         lock.unlock()
     }
@@ -270,15 +291,34 @@ public final class DockBadgeStore: @unchecked Sendable {
     // MARK: - Private
 
     private func getCachedElement(for appKeys: [DockAppKey]) -> AXUIElement? {
+        dropCacheIfDockExited()
         lock.lock()
         defer { lock.unlock() }
         return DockAppKey.element(for: appKeys, in: cachedDockElements)
     }
 
     private func getCachedElements(for appKeys: [DockAppKey]) -> [AXUIElement]? {
+        dropCacheIfDockExited()
         lock.lock()
         defer { lock.unlock() }
         return DockAppKey.elements(for: appKeys, in: cachedDockElements)
+    }
+
+    /// Cached tiles belong to the Dock process that served them; once it exits (`killall Dock`,
+    /// a crash) every read of them fails as if no app had a badge.
+    private func dropCacheIfDockExited() {
+        lock.lock()
+        let dockPID = cachedDockPID
+        lock.unlock()
+        guard dockPID > 0, kill(dockPID, 0) != 0, errno == ESRCH else { return }
+        Logger.debug("Dock exited, dropping badge tile cache", details: "dockPID=\(dockPID)")
+        lock.lock()
+        if cachedDockPID == dockPID {
+            cachedDockElements.removeAll()
+            cachedDockPID = 0
+            lastRebuildTime = 0
+        }
+        lock.unlock()
     }
 
     private func rebuildCache() {
@@ -291,7 +331,7 @@ public final class DockBadgeStore: @unchecked Sendable {
         lock.unlock()
 
         guard let dockPID = NSWorkspace.shared.runningApplications
-            .first(where: { $0.bundleIdentifier == "com.apple.dock" })?
+            .first(where: { $0.bundleIdentifier == "com.apple.dock" && !$0.isTerminated })?
             .processIdentifier else { return }
 
         let dockApp = AXUIElement.application(pid: dockPID)
@@ -301,6 +341,7 @@ public final class DockBadgeStore: @unchecked Sendable {
 
         lock.lock()
         lastRebuildTime = CFAbsoluteTimeGetCurrent()
+        cachedDockPID = dockPID
         cachedDockElements.removeAll()
         for item in dockItems {
             guard let subrole = try? item.subrole(),
