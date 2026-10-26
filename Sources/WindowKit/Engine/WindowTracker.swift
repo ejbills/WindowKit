@@ -607,6 +607,17 @@ public final class WindowTracker {
                 eventSubject.send(.windowDisappeared(window.id))
             }
 
+        case .applicationDemoted(let pid):
+            inFlightTracks.withLockUnchecked { $0[pid]?.cancel() }
+            watchRetryAttempts.withLockUnchecked { _ = $0.removeValue(forKey: pid) }
+            watcherManager?.unwatch(pid: pid)
+            let windows = repository.readCache(forPID: pid)
+            repository.removeAll(forPID: pid)
+            Logger.debug("Application demoted, untracking", details: "pid=\(pid), cachedWindows=\(windows.count)")
+            for window in windows {
+                eventSubject.send(.windowDisappeared(window.id))
+            }
+
         case .applicationActivated(let app):
             repository.registerPID(app.processIdentifier)
             guard !repository.isExcludedOrIgnored(app.processIdentifier) else { break }

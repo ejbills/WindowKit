@@ -505,6 +505,15 @@ public final class WindowKit {
                     self.appStates.removeValue(forKey: pid)
                     self.refreshAllBadges()
 
+                case .applicationDemoted(let pid):
+                    self.cancelLaunchTimeout(for: pid)
+                    self.launchingApplications.removeAll { $0.processIdentifier == pid }
+                    self.removeTrackedApplication(pid: pid)
+                    self.refreshWindowedApplicationPIDs()
+                    self.badgeStore.removeBadge(forPID: pid)
+                    self.appStates[pid]?.invalidateBadge()
+                    self.appStates[pid]?.invalidate()
+
                 case .applicationActivated:
                     self.frontmostApplication = self.tracker.frontmostApplication
                     if let pid = self.frontmostApplication.flatMap(self.processIdentifier(of:)) {

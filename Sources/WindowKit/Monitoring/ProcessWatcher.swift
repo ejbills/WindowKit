@@ -5,6 +5,8 @@ public enum ProcessEvent: Sendable {
     case applicationWillLaunch(NSRunningApplication)
     case applicationLaunched(NSRunningApplication)
     case applicationTerminated(pid_t)
+    /// A running app stopped being `.regular` (turned accessory or background-only).
+    case applicationDemoted(pid_t)
     case applicationActivated(NSRunningApplication)
     case applicationDeactivated(NSRunningApplication)
     case spaceChanged
@@ -18,6 +20,7 @@ public final class ProcessWatcher {
     private var runningAppsObservation: NSKeyValueObservation?
     private var pendingPolicyObservations: [pid_t: PolicyObservation] = [:]
     private var pendingFinishObservations: [pid_t: PolicyObservation] = [:]
+    private var pendingDemotionObservations: [pid_t: PolicyObservation] = [:]
     private var pidsByIdentity: [ObjectIdentifier: (app: NSRunningApplication, pid: pid_t)] = [:]
     private var retiredObservations: [PolicyObservation] = []
     private var retirementDrain: DispatchWorkItem?
@@ -35,11 +38,13 @@ public final class ProcessWatcher {
         }
     }
 
-    /// How long to watch a non-.regular process for a late activation-policy flip.
+    /// How long to watch a process for a late activation-policy flip, either way.
     /// Apps that spawn per-window child processes by exec'ing their own binary
     /// (Bambu Studio, Parallels winapps) appear in runningApplications immediately
     /// but only become .regular once they connect to the window server — sometimes
     /// many seconds later, and without any NSWorkspace launch notification.
+    /// Menu-bar apps without `LSUIElement` start .regular and turn accessory once
+    /// launched, which nothing else reports.
     private static let policyFlipTimeout: TimeInterval = 120
 
     /// Backstop for a launching app whose `isFinishedLaunching` never flips.
@@ -76,6 +81,8 @@ public final class ProcessWatcher {
         pendingPolicyObservations.removeAll()
         pendingFinishObservations.values.forEach { $0.invalidate() }
         pendingFinishObservations.removeAll()
+        pendingDemotionObservations.values.forEach { $0.invalidate() }
+        pendingDemotionObservations.removeAll()
         retirementDrain?.cancel()
         drainRetiredObservations()
         pidsByIdentity.removeAll()
@@ -200,6 +207,11 @@ public final class ProcessWatcher {
                 departedObservations.append(observation)
             }
         }
+        for pid in Set(pendingDemotionObservations.keys).subtracting(currentPIDs) {
+            if let observation = pendingDemotionObservations.removeValue(forKey: pid) {
+                departedObservations.append(observation)
+            }
+        }
         retire(departedObservations)
     }
 
@@ -213,6 +225,7 @@ public final class ProcessWatcher {
         }
         guard !knownPIDs.contains(pid) else { return }
         knownPIDs.insert(pid)
+        observeDemotion(of: app, for: Self.policyFlipTimeout)
 
         guard !app.isFinishedLaunching else {
             eventSubject.send(.applicationLaunched(app))
@@ -248,14 +261,50 @@ public final class ProcessWatcher {
         }
         pendingPolicyObservations[pid] = PolicyObservation(app: app, token: token)
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.policyFlipTimeout) { [weak self] in
-            guard let self, let pending = self.pendingPolicyObservations.removeValue(forKey: pid) else { return }
+            guard let self, self.pendingPolicyObservations[pid]?.token === token,
+                  let pending = self.pendingPolicyObservations.removeValue(forKey: pid) else { return }
             self.retire([pending])
+        }
+    }
+
+    /// Watches a `.regular` app for `duration` and reports it with `.applicationDemoted` if it
+    /// turns accessory or background-only, then watches it for a flip back.
+    private func observeDemotion(of app: NSRunningApplication, for duration: TimeInterval) {
+        let pid = app.processIdentifier
+        guard duration > 0, pendingDemotionObservations[pid] == nil else { return }
+        let token = RunningApplicationResolver.observationTarget(app).observe(\.activationPolicy) { [weak self] _, _ in
+            DispatchQueue.main.async {
+                guard let self, app.activationPolicy != .regular, !app.isTerminated else { return }
+                self.demote(app)
+            }
+        }
+        pendingDemotionObservations[pid] = PolicyObservation(app: app, token: token)
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
+            guard let self, self.pendingDemotionObservations[pid]?.token === token,
+                  let pending = self.pendingDemotionObservations.removeValue(forKey: pid) else { return }
+            self.retire([pending])
+        }
+    }
+
+    private func demote(_ app: NSRunningApplication) {
+        let pid = app.processIdentifier
+        guard knownPIDs.remove(pid) != nil else { return }
+        retire([pendingDemotionObservations.removeValue(forKey: pid), pendingFinishObservations.removeValue(forKey: pid)].compactMap { $0 })
+        Logger.info("Application left .regular", details: "pid=\(pid), policy=\(app.activationPolicy.rawValue)")
+        eventSubject.send(.applicationDemoted(pid))
+        if pendingPolicyObservations[pid] == nil {
+            observePolicyFlip(of: app)
         }
     }
 
     private func setupObservers() {
         let center = NSWorkspace.shared.notificationCenter
-        knownPIDs = Set(runningApplications().map(\.processIdentifier))
+        let regularApps = runningApplications()
+        knownPIDs = Set(regularApps.map(\.processIdentifier))
+        for app in regularApps {
+            guard let launchDate = app.launchDate else { continue }
+            observeDemotion(of: app, for: Self.policyFlipTimeout + launchDate.timeIntervalSinceNow)
+        }
 
         observations.append(center.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
