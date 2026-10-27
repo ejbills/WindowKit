@@ -325,15 +325,17 @@ public func cgsWindowSpaces(_ connection: CGSConnectionID, _ windowID: CGWindowI
 /// Window → Spaces lookup for a batch of windows in one WindowServer round
 /// trip per Space, instead of one per window (`cgsWindowSpaces`). Windows on
 /// none of `spaceIDs` are absent from the result; callers fall back per window.
-public func cgsWindowSpaceMap(_ connection: CGSConnectionID, spaceIDs: [CGSSpaceID], windowIDs: Set<CGWindowID>) -> [CGWindowID: [Int]] {
+/// `includesMinimized` also lists minimized windows and hidden apps' windows.
+public func cgsWindowSpaceMap(_ connection: CGSConnectionID, spaceIDs: [CGSSpaceID], windowIDs: Set<CGWindowID>, includesMinimized: Bool = false) -> [CGWindowID: [Int]] {
     var result: [CGWindowID: [Int]] = [:]
     guard !windowIDs.isEmpty else { return result }
     loadSkyLightFunctions()
+    let options: UInt32 = includesMinimized ? 0x7 : 0x2
     for spaceID in spaceIDs {
         var setTags: UInt64 = 0
         var clearTags: UInt64 = 0
         let spaces: CFArray = [NSNumber(value: spaceID)] as CFArray
-        guard let windows = copyWindowsWithOptionsAndTagsPtr?(connection, 0, spaces, 0x2, &setTags, &clearTags)?.takeRetainedValue() as? [NSNumber] else {
+        guard let windows = copyWindowsWithOptionsAndTagsPtr?(connection, 0, spaces, options, &setTags, &clearTags)?.takeRetainedValue() as? [NSNumber] else {
             continue
         }
         for number in windows {

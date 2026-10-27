@@ -98,6 +98,12 @@ public final class WindowRepository: @unchecked Sendable {
         return Set(entries.compactMap { $1.isEmpty ? nil : $0 })
     }
 
+    public func allWindowIDs() -> Set<CGWindowID> {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return Set(entries.values.lazy.flatMap { $0 }.map(\.id))
+    }
+
     public func readCache(forPID pid: pid_t) -> [CapturedWindow] {
         cacheLock.lock()
         defer { cacheLock.unlock() }

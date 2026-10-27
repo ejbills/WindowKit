@@ -257,6 +257,17 @@ public final class WindowKit {
     /// actually changes, so observation fires exactly on presence flips.
     public private(set) var windowedApplicationPIDs: Set<pid_t> = []
 
+    /// Window IDs on each display's current Space, keyed by the `CGDirectDisplayID` of every screen that Space shows on. Maintained only while `tracksCurrentSpaceWindows` is on.
+    public private(set) var currentSpaceWindowIDs: [CGDirectDisplayID: Set<CGWindowID>] = [:]
+
+    /// Opt-in toggle for `currentSpaceWindowIDs` (default `false`).
+    public var tracksCurrentSpaceWindows: Bool = false {
+        didSet {
+            guard oldValue != tracksCurrentSpaceWindows else { return }
+            refreshCurrentSpaceWindowIDs()
+        }
+    }
+
     /// Every minimized window the native macOS Dock parks near Trash, sourced by
     /// observing the Dock's accessibility tree (correct even when the native Dock is
     /// hidden). Each entry carries its owner pid and a window-preview thumbnail, so
@@ -526,7 +537,7 @@ public final class WindowKit {
                     self.appStates[pid]?.invalidate()
 
                 case .spaceChanged:
-                    break
+                    self.refreshCurrentSpaceWindowIDs()
                 }
             }
             .store(in: &cancellables)
@@ -602,6 +613,26 @@ public final class WindowKit {
         windowedApplicationPIDs = pids
     }
 
+    /// Recomputes `currentSpaceWindowIDs` with one display query and one batched window-Space lookup.
+    private func refreshCurrentSpaceWindowIDs() {
+        guard tracksCurrentSpaceWindows, isTrackingActive else {
+            if !currentSpaceWindowIDs.isEmpty { currentSpaceWindowIDs = [:] }
+            return
+        }
+        guard let displays = try? WindowSpaces.managedDisplays() else { return }
+        let spaceIDs = displays.map(\.currentSpaceID)
+        let spaceMap = cgsWindowSpaceMap(CGSMainConnectionID(), spaceIDs: spaceIDs, windowIDs: tracker.repository.allWindowIDs(), includesMinimized: true)
+        var result: [CGDirectDisplayID: Set<CGWindowID>] = [:]
+        for display in displays {
+            let ids = Set(spaceMap.lazy.filter { $0.value.contains(Int(display.currentSpaceID)) }.map(\.key))
+            for screen in display.screens {
+                if let displayID = screen.directDisplayID { result[displayID] = ids }
+            }
+        }
+        guard result != currentSpaceWindowIDs else { return }
+        currentSpaceWindowIDs = result
+    }
+
     /// Coalesces bursts of `tracker.events` (e.g. ~1000 window events on a Space
     /// switch) into a single pass of tracked-application resolution and app-state
     /// invalidation per runloop turn, instead of repeating that work per event.
@@ -620,6 +651,7 @@ public final class WindowKit {
             pendingTrackedRefresh = false
             refreshTrackedApplicationsFromRepository()
             refreshWindowedApplicationPIDs()
+            refreshCurrentSpaceWindowIDs()
         }
 
         var pidsToInvalidate = pendingPIDInvalidations
@@ -1172,6 +1204,7 @@ public final class WindowKit {
     public func beginTracking() {
         isTrackingActive = true
         tracker.startTracking()
+        refreshCurrentSpaceWindowIDs()
         if tracksOrphanedMinimizedWindows {
             orphanedWindowTracker.start()
         }
@@ -1194,6 +1227,7 @@ public final class WindowKit {
         appSwitcherObserver.stop()
         minimizeTransitionTracker.stop()
         tracker.stopTracking()
+        refreshCurrentSpaceWindowIDs()
     }
 
     /// Forces an immediate rebuild of the minimized-dock-window set, bypassing the
