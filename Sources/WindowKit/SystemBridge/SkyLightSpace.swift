@@ -300,6 +300,13 @@ public final class WindowOverlaySpace {
     private var held = false
     private var commitRelease: DispatchWorkItem?
     private var subscriptions = Set<AnyCancellable>()
+    private let commitSettledSubject = PassthroughSubject<Void, Never>()
+
+    /// Fires on main when the Space comes back down after a hold or a focus request: the Space change it waited for
+    /// landed and `commitSettle` passed, or none came within `commitTimeout`.
+    public var commitSettled: AnyPublisher<Void, Never> {
+        commitSettledSubject.eraseToAnyPublisher()
+    }
 
     private var elevatedAtRest = false
     private let dragPasteboard = NSPasteboard(name: .drag)
@@ -328,8 +335,10 @@ public final class WindowOverlaySpace {
     /// How long a commit hold waits for the Space change before dropping.
     private static let commitTimeout: TimeInterval = 1.0
 
-    /// How long the Space stays up after the Space change lands.
-    private static let commitSettle: TimeInterval = 0.25
+    /// How long the Space stays up after the last Space change. A desktop picked in Mission Control's Spaces Bar is
+    /// still switching, or posts another Space change, up to ~0.4s after the first; at 0.25s the switch composited over
+    /// the Space for a frame (measured on 27.2, Oct 2026).
+    private static let commitSettle: TimeInterval = 0.5
 
     public init(elevatedLevel: Int32 = 100) throws {
         connection = CGSMainConnectionID()
@@ -356,6 +365,7 @@ public final class WindowOverlaySpace {
     /// the Space commit that may follow.
     public func setElevationHeld(_ isHeld: Bool) {
         guard elevatedLevel != Self.restingLevel, isHeld != held else { return }
+        Logger.debug("Overlay Space hold \(isHeld ? "on" : "off")", details: "awaitingCommit=\(commitRelease != nil)")
         held = isHeld
         if isHeld {
             commitRelease?.cancel()
@@ -387,6 +397,7 @@ public final class WindowOverlaySpace {
 
     private func handleFocusRequest(_ windowID: CGWindowID) {
         guard !isOnVisibleSpace(windowID) else { return }
+        Logger.debug("Overlay Space awaiting the commit of a focus request", details: "window=\(windowID)")
         awaitCommit()
     }
 
@@ -398,7 +409,11 @@ public final class WindowOverlaySpace {
     }
 
     private func handleSpaceChange() {
-        guard !held, commitRelease != nil else { return }
+        guard !held, commitRelease != nil else {
+            Logger.debug("Overlay Space saw a Space change", details: held ? "held, ignored" : "not awaiting a commit, ignored")
+            return
+        }
+        Logger.debug("Overlay Space saw a Space change", details: "settling for \(Self.commitSettle)s")
         scheduleCommitRelease(after: Self.commitSettle)
     }
 
@@ -411,8 +426,10 @@ public final class WindowOverlaySpace {
         commitRelease?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
+            Logger.debug("Overlay Space commit release fired", details: "after \(delay)s")
             commitRelease = nil
             applyLevel()
+            commitSettledSubject.send()
         }
         commitRelease = work
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
