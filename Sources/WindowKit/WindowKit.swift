@@ -129,8 +129,10 @@ public final class AppBadgeState {
     public let bundleURL: URL?
     private let lookup: AppBadgeLookup
     private let badgeStore: DockBadgeStore
+    @ObservationIgnored private weak var downloads: DownloadProgressTracker?
 
     private var badgeVersion: UInt = 0
+    private var downloadVersion: UInt = 0
 
     public var badgeLabel: String? {
         _ = badgeVersion
@@ -153,23 +155,36 @@ public final class AppBadgeState {
         return DockAppKey.parsedBadgeCount(from: label)
     }
 
-    init(bundleIdentifier: String, badgeStore: DockBadgeStore) {
+    /// Active downloads credited to this app, nil when it has none or `tracksDownloadProgress` is off.
+    /// Observed separately from the badge, so progress ticks don't re-render badge readers.
+    public var downloadProgress: AppDownloadProgress? {
+        _ = downloadVersion
+        return bundleIdentifier.flatMap { downloads?.progress(forBundleIdentifier: $0) }
+    }
+
+    init(bundleIdentifier: String, badgeStore: DockBadgeStore, downloads: DownloadProgressTracker?) {
         self.lookup = .bundleIdentifier(bundleIdentifier)
         self.bundleIdentifier = bundleIdentifier
         self.bundleURL = nil
         self.badgeStore = badgeStore
+        self.downloads = downloads
     }
 
-    init(bundleURL: URL, badgeStore: DockBadgeStore) {
+    init(bundleURL: URL, badgeStore: DockBadgeStore, downloads: DownloadProgressTracker?) {
         let standardizedURL = bundleURL.standardizedFileURL
         self.lookup = .bundlePath(standardizedURL.path)
         self.bundleIdentifier = Bundle(url: standardizedURL)?.bundleIdentifier
         self.bundleURL = standardizedURL
         self.badgeStore = badgeStore
+        self.downloads = downloads
     }
 
     func invalidate() {
         badgeVersion &+= 1
+    }
+
+    func invalidateDownloads() {
+        downloadVersion &+= 1
     }
 }
 
@@ -259,6 +274,11 @@ public final class WindowKit {
 
     /// Window IDs on each display's current Space, keyed by the `CGDirectDisplayID` of every screen that Space shows on. Maintained only while `tracksCurrentSpaceWindows` is on.
     public private(set) var currentSpaceWindowIDs: [CGDirectDisplayID: Set<CGWindowID>] = [:]
+
+    /// Opt-in toggle for `AppBadgeState.downloadProgress` (default `false`).
+    public var tracksDownloadProgress: Bool = false {
+        didSet { downloadTracker?.isEnabled = tracksDownloadProgress }
+    }
 
     /// Opt-in toggle for `currentSpaceWindowIDs` (default `false`).
     public var tracksCurrentSpaceWindows: Bool = false {
@@ -458,6 +478,7 @@ public final class WindowKit {
     @ObservationIgnored private var resolutionGeneration: UInt64 = 0
     private let resolutionQueue = DispatchQueue(label: "com.windowkit.tracked-app-resolution", qos: .userInitiated)
     @ObservationIgnored private var badgeStates: [AppBadgeLookup: AppBadgeState] = [:]
+    @ObservationIgnored private var downloadTracker: DownloadProgressTracker?
     private var badgePollTimer: Timer?
     private let badgeQueue = DispatchQueue(label: "com.windowkit.badge", qos: .userInitiated)
     private var badgeRefreshInFlight = false
@@ -605,6 +626,23 @@ public final class WindowKit {
                 self?.processSwitcherSelection = selection
             }
             .store(in: &cancellables)
+
+        downloadTracker = DownloadProgressTracker(
+            frontmostBundleIdentifier: { [weak self] in
+                guard let self, let app = self.frontmostApplication,
+                      let pid = self.processIdentifier(of: app), !self.ignoredPIDs.contains(pid)
+                else { return nil }
+                return app.bundleIdentifier
+            },
+            onChange: { [weak self] bundleIdentifiers in
+                guard let self else { return }
+                for state in self.badgeStates.values {
+                    if let bundleIdentifier = state.bundleIdentifier, bundleIdentifiers.contains(bundleIdentifier) {
+                        state.invalidateDownloads()
+                    }
+                }
+            }
+        )
     }
 
     private func refreshWindowedApplicationPIDs() {
@@ -1338,7 +1376,7 @@ public final class WindowKit {
     public func badgeState(forBundleIdentifier bundleIdentifier: String) -> AppBadgeState {
         let lookup = AppBadgeLookup.bundleIdentifier(bundleIdentifier)
         if let existing = badgeStates[lookup] { return existing }
-        let state = AppBadgeState(bundleIdentifier: bundleIdentifier, badgeStore: badgeStore)
+        let state = AppBadgeState(bundleIdentifier: bundleIdentifier, badgeStore: badgeStore, downloads: downloadTracker)
         badgeStates[lookup] = state
         refreshBadge(forBundleIdentifier: bundleIdentifier)
         return state
@@ -1354,7 +1392,7 @@ public final class WindowKit {
         let standardizedURL = bundleURL.standardizedFileURL
         let lookup = AppBadgeLookup.bundlePath(standardizedURL.path)
         if let existing = badgeStates[lookup] { return existing }
-        let state = AppBadgeState(bundleURL: standardizedURL, badgeStore: badgeStore)
+        let state = AppBadgeState(bundleURL: standardizedURL, badgeStore: badgeStore, downloads: downloadTracker)
         badgeStates[lookup] = state
         refreshBadge(forBundleURL: standardizedURL)
         return state
