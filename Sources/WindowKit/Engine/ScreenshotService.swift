@@ -32,36 +32,60 @@ public struct ScreenshotService: Sendable {
         self.captureQuality = captureQuality
     }
 
+    /// The whole window, wherever it sits: minimized, hidden, on another Space, or mostly outside
+    /// every display. Stage Manager strip windows exist only as thumbnails in a window-list image,
+    /// so with Stage Manager on the WindowServer capture is taken as well and kept when it holds
+    /// the larger picture. Synchronous WindowServer work.
     public func captureWindow(id windowID: CGWindowID) throws -> CGImage {
         guard !headless, SystemPermissions.hasScreenRecording() else {
             throw ScreenshotError.permissionDenied
         }
 
-        let connection = cgsMainConnection()
-        var windowIDValue = UInt32(windowID)
-
-        let resolutionOption: CaptureOptions = captureQuality == .best ? .fullResolution : .efficientResolution
-        let options: CaptureOptions = [.ignoreClipping, .stageManagerFullSize, resolutionOption]
-
-        guard let images = CGSHWCaptureWindowList(
-            connection,
-            &windowIDValue,
-            1,
-            options
-        ) as? [CGImage],
-        let image = images.first else {
-            throw ScreenshotError.captureFailure
+        var image = wholeWindowImage(id: windowID).flatMap { Self.sampledCoverage($0) > 0 ? $0 : nil }
+        if image == nil || Self.isStageManagerEnabled,
+           let composited = serverCompositedImage(id: windowID)
+        {
+            let coverage = Self.sampledCoverage(composited)
+            let pixels = composited.width * composited.height
+            if let whole = image {
+                if coverage >= 0.5, pixels > whole.width * whole.height { image = composited }
+            } else if coverage > 0 {
+                image = composited
+            }
         }
-
-        guard !Self.isFullyTransparent(image) else {
-            throw ScreenshotError.captureFailure
-        }
+        guard let image else { throw ScreenshotError.captureFailure }
 
         if let scaled = Self.downsampled(image, factor: downsampleFactor) {
             return scaled
         }
         Self.cgImageSetCachingFlags?(image, Self.kCGImageCachingTransient)
         return image
+    }
+
+    /// Window-list image of one window by ID. Unlike `CGSHWCaptureWindowList` it is not clipped to
+    /// the displays, and unlike `CGWindowListCreateImage` it also returns minimized and hidden windows.
+    private func wholeWindowImage(id windowID: CGWindowID) -> CGImage? {
+        guard let createImageFromArray = Self.createImageFromArray else { return nil }
+        var windows: [UnsafeRawPointer?] = [UnsafeRawPointer(bitPattern: UInt(windowID))]
+        guard let windowArray = CFArrayCreate(nil, &windows, 1, nil) else { return nil }
+        let resolution: CGWindowImageOption = captureQuality == .best ? .bestResolution : .nominalResolution
+        return createImageFromArray(.null, windowArray, CGWindowImageOption.boundsIgnoreFraming.rawValue | resolution.rawValue)?
+            .takeRetainedValue()
+    }
+
+    /// WindowServer capture of one window, clipped to the displays on macOS 26 and later. With
+    /// `.stageManagerFullSize` it returns Stage Manager strip windows at full size where the system still renders them.
+    private func serverCompositedImage(id windowID: CGWindowID) -> CGImage? {
+        var windowIDValue = UInt32(windowID)
+        let resolutionOption: CaptureOptions = captureQuality == .best ? .fullResolution : .efficientResolution
+        let options: CaptureOptions = [.ignoreClipping, .stageManagerFullSize, resolutionOption]
+        return (CGSHWCaptureWindowList(cgsMainConnection(), &windowIDValue, 1, options) as? [CGImage])?.first
+    }
+
+    private static let windowManagerDefaults = UserDefaults(suiteName: "com.apple.WindowManager")
+
+    private static var isStageManagerEnabled: Bool {
+        windowManagerDefaults?.bool(forKey: "GloballyEnabled") ?? false
     }
 
     /// Marks captures transient so drawing them doesn't insert their decoded
@@ -75,35 +99,39 @@ public struct ScreenshotService: Sendable {
     /// kCGImageCachingTemporary = 3 (the default). 0 is not a defined flag value.
     private static let kCGImageCachingTransient: UInt32 = 1
 
-    /// Some apps (Electron/Chromium hosts under Stage Manager, backgrounded
-    /// GPU-composited windows) hand back an all-zero-alpha surface. Sample the
-    /// alpha channel on a 16x16 grid so those captures are treated as failures
-    /// rather than cached as blank previews.
-    static func isFullyTransparent(_ image: CGImage) -> Bool {
-        let alphaOffset: Int
+    /// Share of a 16x16 sample grid with non-zero alpha; 1 for formats it can't read. Some apps
+    /// (Electron/Chromium hosts under Stage Manager, backgrounded GPU-composited windows) hand back
+    /// an all-zero-alpha surface, which must fail the capture rather than be cached as a blank preview.
+    static func sampledCoverage(_ image: CGImage) -> Double {
+        let alphaLeads: Bool
         switch image.alphaInfo {
-        case .premultipliedFirst, .first: alphaOffset = 0
-        case .premultipliedLast, .last: alphaOffset = 3
-        default: return false
+        case .premultipliedFirst, .first: alphaLeads = true
+        case .premultipliedLast, .last: alphaLeads = false
+        default: return 1
         }
+        let isLittleEndian = image.byteOrderInfo == .order32Little
+        let alphaOffset = alphaLeads != isLittleEndian ? 0 : 3
         guard image.bitsPerPixel == 32,
               let data = image.dataProvider?.data,
               let bytes = CFDataGetBytePtr(data)
-        else { return false }
+        else { return 1 }
         let length = CFDataGetLength(data)
         let stepX = max(image.width / 16, 1)
         let stepY = max(image.height / 16, 1)
+        var samples = 0
+        var visible = 0
         var y = 0
         while y < image.height {
             var x = 0
             while x < image.width {
                 let offset = y * image.bytesPerRow + x * 4 + alphaOffset
-                if offset < length, bytes[offset] != 0 { return false }
+                samples += 1
+                if offset < length, bytes[offset] != 0 { visible += 1 }
                 x += stepX
             }
             y += stepY
         }
-        return true
+        return samples > 0 ? Double(visible) / Double(samples) : 0
     }
 
     static func downsampled(_ image: CGImage, factor: Int) -> CGImage? {
